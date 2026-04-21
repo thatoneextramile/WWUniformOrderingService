@@ -1,0 +1,208 @@
+// ============================================================
+// WONDERWORLD UNIFORMS — PRISMA SCHEMA (PostgreSQL)
+// ============================================================
+// Setup:
+//   npm install prisma @prisma/client
+//   npx prisma init --datasource-provider postgresql
+//   npx prisma migrate dev --name init
+//   npx prisma generate
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DIRECT_URL")
+}
+
+// ─── ENUMS ───────────────────────────────────────────────────
+
+enum OrderStatus {
+  SUBMITTED
+  REVIEW
+  READY_FOR_PICKUP
+  PICKED_UP
+  CANCELLED
+}
+
+enum Size {
+  T1
+  T2
+  T3
+  T4
+  T5
+}
+
+enum AdminRole {
+  SUPER_ADMIN
+  MANAGER
+  STAFF
+}
+
+enum FieldType {
+  text
+  textarea
+  select
+  phone
+  email
+}
+
+// ─── MODELS ──────────────────────────────────────────────────
+
+model Admin {
+  id        String    @id @default(cuid())
+  name      String
+  email     String    @unique
+  password  String    // bcrypt hash — NEVER expose in API responses
+  role      AdminRole @default(STAFF)
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@map("admins")
+}
+
+model Parent {
+  id        String   @id @default(cuid())
+  firstName String
+  lastName  String
+  email     String   @unique
+  phone     String
+  password  String   // bcrypt hash — NEVER expose in API responses
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  orders    Order[]
+
+  @@map("parents")
+}
+
+model Product {
+    id           String   @id @default(cuid())
+  name         String
+  description  String?
+  imageUrl     String?
+  imageUrls    String[] @default([])   // ← ADD THIS
+  imageEmoji   String?  @default("👕")
+  imageBg      String?  @default("#e8f7f0")  // ← ADD THIS
+  category     String?
+  sellingPrice Decimal  @db.Decimal(10, 2)
+  costPrice    Decimal  @db.Decimal(10, 2)
+  isActive     Boolean  @default(true)
+  sortOrder    Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  inventory    Inventory[]
+  orderItems   OrderItem[]
+
+  @@map("products")
+  
+}
+
+// Inventory per product per size
+// availableQty = totalQty - reservedQty (ALWAYS computed, never stored)
+model Inventory {
+  id          String   @id @default(cuid())
+  productId   String
+  size        Size
+  totalQty    Int      @default(0)   // physical stock on hand
+  reservedQty Int      @default(0)   // held for SUBMITTED/REVIEW orders
+  updatedAt   DateTime @updatedAt
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, size])
+  @@map("inventory")
+}
+
+model Location {
+  id        String   @id @default(cuid())
+  name      String
+  isActive  Boolean  @default(true)
+  isDefault Boolean  @default(false)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  orders    Order[]
+
+  @@map("locations")
+}
+
+model Order {
+  id             String      @id @default(cuid())
+  orderNumber    String      @unique  // e.g. "WW-2047"
+  parentId       String
+  parentName     String      // snapshot — in case parent updates their profile
+  parentPhone    String      // snapshot
+  childName      String
+  childClass     String
+  locationId     String
+  notes          String?
+  // extra dynamic fields from form configuration (stored as JSON)
+  extraFields    Json?       // { "teacherName": "Ms. Rose", ... }
+  subtotal       Decimal     @db.Decimal(10, 2)
+  discountRate   Decimal     @db.Decimal(5, 4)   // 0.1500 = 15%
+  discountAmount Decimal     @db.Decimal(10, 2)
+  totalAmount    Decimal     @db.Decimal(10, 2)
+  status         OrderStatus @default(SUBMITTED)
+  statusHistory  Json?       // [{ status, changedAt, changedBy }]
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  parent         Parent      @relation(fields: [parentId], references: [id])
+  location       Location    @relation(fields: [locationId], references: [id])
+  items          OrderItem[]
+
+  @@index([status])
+  @@index([parentId])
+  @@index([locationId])
+  @@map("orders")
+}
+
+model OrderItem {
+  id          String  @id @default(cuid())
+  orderId     String
+  productId   String
+  productName String  // snapshot at time of order
+  size        Size
+  quantity    Int
+  unitPrice   Decimal @db.Decimal(10, 2)  // snapshot at time of order
+  order       Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product     Product @relation(fields: [productId], references: [id])
+
+  @@map("order_items")
+}
+
+// Singleton settings row (id always = "singleton")
+model SiteSettings {
+  id                String   @id @default("singleton")
+  systemName        String   @default("Wonderworld Uniforms")
+  logoUrl           String?
+  logoEmoji         String?  @default("🎒")
+  welcomeTitle      String   @default("Welcome to Wonderworld! 🌈")
+  welcomeText       String?
+  orderInstructions String?
+  noticeText        String?
+  discountThreshold Decimal  @db.Decimal(10, 2) @default(500)
+  discountRate      Decimal  @db.Decimal(5, 4)  @default(0.15)
+  updatedAt         DateTime @updatedAt
+
+  @@map("site_settings")
+}
+
+// Dynamic order form fields configured in Master Control
+model FormField {
+  id        String    @id @default(cuid())
+  label     String
+  fieldKey  String    @unique
+  fieldType FieldType @default(text)
+  isRequired Boolean  @default(true)
+  isVisible  Boolean  @default(true)
+  isSystem   Boolean  @default(false)  // system fields cannot be deleted
+  sortOrder  Int      @default(0)
+  options    Json?    // for select fields: [{ value, label }]
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("form_fields")
+}
