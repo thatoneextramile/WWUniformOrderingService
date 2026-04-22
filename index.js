@@ -137,6 +137,7 @@ async function getS3Uploader() {
  *             returns the S3 public URL.
  */
 async function uploadFile(localPath, filename, mimetype) {
+  console.log(STORAGE_MODE)
   if (STORAGE_MODE === "supabase") {
     const fileBuffer = fs.readFileSync(localPath);
     const { error } = await supabase.storage
