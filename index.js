@@ -87,14 +87,7 @@ if (STORAGE_MODE === "local" && !fs.existsSync(UPLOAD_DIR)) {
 const ALLOWED_MIME = ["image/jpeg", "image/png", "image/webp", "image/gif"];
 const MAX_FILE_SIZE = 8 * 1024 * 1024; // 8 MB
 
-const multerStorage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase() || ".jpg";
-    const unique = `${Date.now()}-${crypto.randomBytes(6).toString("hex")}${ext}`;
-    cb(null, unique);
-  },
-});
+const multerStorage = multer.memoryStorage();
 
 const multerFilter = (req, file, cb) => {
   if (ALLOWED_MIME.includes(file.mimetype)) cb(null, true);
@@ -136,26 +129,24 @@ async function getS3Uploader() {
  * In s3 mode: reads the file, uploads to S3, deletes the temp file,
  *             returns the S3 public URL.
  */
-async function uploadFile(localPath, filename, mimetype) {
-  console.log(STORAGE_MODE)
+async function uploadFile(buffer, filename, mimetype) {
+  console.log(STORAGE_MODE);
   if (STORAGE_MODE === "supabase") {
-    const fileBuffer = fs.readFileSync(localPath);
     const { error } = await supabase.storage
       .from("products")
-      .upload(`images/${filename}`, fileBuffer, {
+      .upload(`images/${filename}`, buffer, {
         contentType: mimetype,
         upsert: true,
       });
     if (error) throw new Error(`Supabase upload failed: ${error.message}`);
-    fs.unlinkSync(localPath); // delete the temp file multer saved locally
     const { data } = supabase.storage
       .from("products")
       .getPublicUrl(`images/${filename}`);
-
-    console.log(data.publicUrl);
     return data.publicUrl;
   }
-  // local fallback
+  // local fallback — write buffer to disk
+  const localPath = path.join(UPLOAD_DIR, filename);
+  fs.writeFileSync(localPath, buffer);
   return `${PUBLIC_URL}/uploads/${filename}`;
 }
 
@@ -167,12 +158,9 @@ async function deleteFile(url) {
   try {
     if (!url) return;
     if (STORAGE_MODE === "supabase") {
-      // Extract just the path after the bucket name
       const marker = "/storage/v1/object/public/products/";
       const filePath = url.split(marker)[1];
-      if (filePath) {
-        await supabase.storage.from("products").remove([filePath]);
-      }
+      if (filePath) await supabase.storage.from("products").remove([filePath]);
       return;
     }
     // local fallback
@@ -436,10 +424,14 @@ app.post(
       return res.status(400).json({
         error: "No images uploaded. Send files under the field name 'images'",
       });
-
+    console.log("start uploading");
     // Upload each file and collect URLs
     const newUrls = await Promise.all(
-      req.files.map((f) => uploadFile(f.path, f.filename, f.mimetype)),
+      req.files.map((f) => {
+        const ext = path.extname(f.originalname).toLowerCase() || ".jpg";
+        const filename = `${Date.now()}-${crypto.randomBytes(6).toString("hex")}${ext}`;
+        return uploadFile(f.buffer, filename, f.mimetype);
+      }),
     );
 
     // Fetch current imageUrls and append
