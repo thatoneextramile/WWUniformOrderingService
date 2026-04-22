@@ -58,7 +58,10 @@ import { PrismaClient } from "@prisma/client";
 import "express-async-errors";
 import dotenv from "dotenv";
 dotenv.config();
+import { Resend } from "resend";
+import { createClient } from "@supabase/supabase-js";
 
+const resend = new Resend(process.env.RESEND_API_KEY);
 const app = express();
 const prisma = new PrismaClient();
 const PORT = process.env.PORT || 4000;
@@ -68,6 +71,10 @@ const UPLOAD_DIR = process.env.UPLOAD_DIR || "uploads";
 const PUBLIC_URL = (
   process.env.PUBLIC_URL || `http://localhost:${PORT}`
 ).replace(/\/$/, "");
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY,
+);
 
 // ─── ENSURE LOCAL UPLOAD DIR EXISTS ──────────────────────────
 if (STORAGE_MODE === "local" && !fs.existsSync(UPLOAD_DIR)) {
@@ -130,26 +137,25 @@ async function getS3Uploader() {
  *             returns the S3 public URL.
  */
 async function uploadFile(localPath, filename, mimetype) {
-  if (STORAGE_MODE !== "s3") {
-    return `${PUBLIC_URL}/uploads/${filename}`;
+  if (STORAGE_MODE === "supabase") {
+    const fileBuffer = fs.readFileSync(localPath);
+    const { error } = await supabase.storage
+      .from("products")
+      .upload(`images/${filename}`, fileBuffer, {
+        contentType: mimetype,
+        upsert: true,
+      });
+    if (error) throw new Error(`Supabase upload failed: ${error.message}`);
+    fs.unlinkSync(localPath); // delete the temp file multer saved locally
+    const { data } = supabase.storage
+      .from("products")
+      .getPublicUrl(`images/${filename}`);
+
+    console.log(data.publicUrl);
+    return data.publicUrl;
   }
-  const { s3, PutObjectCommand } = await getS3Uploader();
-  const key = `products/${filename}`;
-  const fileBuffer = fs.readFileSync(localPath);
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: process.env.AWS_BUCKET,
-      Key: key,
-      Body: fileBuffer,
-      ContentType: mimetype,
-      ACL: "public-read",
-    }),
-  );
-  fs.unlinkSync(localPath); // remove temp file after S3 upload
-  const endpoint = process.env.AWS_ENDPOINT
-    ? `${process.env.AWS_ENDPOINT}/${process.env.AWS_BUCKET}`
-    : `https://${process.env.AWS_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com`;
-  return `${endpoint}/${key}`;
+  // local fallback
+  return `${PUBLIC_URL}/uploads/${filename}`;
 }
 
 /**
@@ -159,24 +165,112 @@ async function uploadFile(localPath, filename, mimetype) {
 async function deleteFile(url) {
   try {
     if (!url) return;
-    if (STORAGE_MODE !== "s3") {
-      const filename = url.split("/uploads/")[1];
-      if (filename) {
-        const localPath = path.join(UPLOAD_DIR, filename);
-        if (fs.existsSync(localPath)) fs.unlinkSync(localPath);
+    if (STORAGE_MODE === "supabase") {
+      // Extract just the path after the bucket name
+      const marker = "/storage/v1/object/public/products/";
+      const filePath = url.split(marker)[1];
+      if (filePath) {
+        await supabase.storage.from("products").remove([filePath]);
       }
       return;
     }
-    // S3: extract the key from the URL
-    const { s3, DeleteObjectCommand } = await getS3Uploader();
-    const urlObj = new URL(url);
-    const key = urlObj.pathname.replace(/^\//, "");
-    await s3.send(
-      new DeleteObjectCommand({ Bucket: process.env.AWS_BUCKET, Key: key }),
-    );
+    // local fallback
+    const filename = url.split("/uploads/")[1];
+    if (filename) {
+      const localPath = path.join(UPLOAD_DIR, filename);
+      if (fs.existsSync(localPath)) fs.unlinkSync(localPath);
+    }
   } catch (err) {
     console.warn("deleteFile warning:", err.message);
   }
+}
+
+async function sendOrderEmails(order, parentEmail) {
+  if (!process.env.RESEND_API_KEY) return; // skip if not configured
+
+  const itemsHtml = order.items
+    .map(
+      (i) => `
+      <tr>
+        <td style="padding:8px 12px;border-bottom:1px solid #eee">${i.productName}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:center">${i.size}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:center">${i.quantity}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right">$${Number(i.unitPrice).toFixed(2)}</td>
+      </tr>`,
+    )
+    .join("");
+
+  const orderSummaryHtml = `
+    <table style="width:100%;border-collapse:collapse;margin:16px 0">
+      <thead>
+        <tr style="background:#f7f8fa">
+          <th style="padding:8px 12px;text-align:left">Item</th>
+          <th style="padding:8px 12px;text-align:center">Size</th>
+          <th style="padding:8px 12px;text-align:center">Qty</th>
+          <th style="padding:8px 12px;text-align:right">Price</th>
+        </tr>
+      </thead>
+      <tbody>${itemsHtml}</tbody>
+    </table>
+    <table style="width:100%;margin-top:8px">
+      <tr><td style="padding:4px 12px;color:#666">Subtotal</td><td style="padding:4px 12px;text-align:right">$${Number(order.subtotal).toFixed(2)}</td></tr>
+      ${Number(order.discountAmount) > 0 ? `<tr><td style="padding:4px 12px;color:#e05a2b">Discount</td><td style="padding:4px 12px;text-align:right;color:#e05a2b">-$${Number(order.discountAmount).toFixed(2)}</td></tr>` : ""}
+      <tr style="font-weight:700;font-size:16px"><td style="padding:8px 12px;border-top:2px solid #eee">Total</td><td style="padding:8px 12px;text-align:right;border-top:2px solid #eee;color:#1a7a55">$${Number(order.totalAmount).toFixed(2)}</td></tr>
+    </table>`;
+
+  const baseStyle = `font-family:sans-serif;max-width:600px;margin:0 auto;color:#1a1d23`;
+
+  // ── Email to parent ──────────────────────────────────────
+  const parentHtml = `
+    <div style="${baseStyle}">
+      <div style="background:#1a7a55;padding:24px 32px;border-radius:8px 8px 0 0">
+        <h1 style="color:#fff;margin:0;font-size:22px">🎒 Order Confirmed!</h1>
+      </div>
+      <div style="background:#fff;padding:32px;border:1px solid #eee;border-top:none;border-radius:0 0 8px 8px">
+        <p>Hi <strong>${order.parentName}</strong>,</p>
+        <p>Your uniform order has been received and is being reviewed. We'll update you when it's ready for pick up.</p>
+        <div style="background:#f7f8fa;border-radius:8px;padding:16px;margin:16px 0">
+          <p style="margin:0 0 4px 0;font-size:13px;color:#666">Order Number</p>
+          <p style="margin:0;font-size:20px;font-weight:700;color:#1a7a55">${order.orderNumber}</p>
+        </div>
+        <p><strong>Child:</strong> ${order.childName} · ${order.childClass}</p>
+        ${orderSummaryHtml}
+        <p style="color:#666;font-size:13px;margin-top:24px">You'll receive another email when your order is ready for pick up.</p>
+      </div>
+    </div>`;
+
+  // ── Email to admin ───────────────────────────────────────
+  const adminHtml = `
+    <div style="${baseStyle}">
+      <div style="background:#1a5f8a;padding:24px 32px;border-radius:8px 8px 0 0">
+        <h1 style="color:#fff;margin:0;font-size:22px">📋 New Order Received</h1>
+      </div>
+      <div style="background:#fff;padding:32px;border:1px solid #eee;border-top:none;border-radius:0 0 8px 8px">
+        <div style="background:#f7f8fa;border-radius:8px;padding:16px;margin-bottom:16px">
+          <p style="margin:0 0 4px 0;font-size:13px;color:#666">Order Number</p>
+          <p style="margin:0;font-size:20px;font-weight:700;color:#1a5f8a">${order.orderNumber}</p>
+        </div>
+        <p><strong>Parent:</strong> ${order.parentName} · ${order.parentPhone}</p>
+        <p><strong>Child:</strong> ${order.childName} · ${order.childClass}</p>
+        ${orderSummaryHtml}
+      </div>
+    </div>`;
+
+  // Send both emails concurrently, don't let email failure break the order
+  await Promise.allSettled([
+    resend.emails.send({
+      from: process.env.EMAIL_FROM,
+      to: parentEmail,
+      subject: `Order Confirmed — ${order.orderNumber}`,
+      html: parentHtml,
+    }),
+    resend.emails.send({
+      from: process.env.EMAIL_FROM,
+      to: process.env.ADMIN_EMAIL,
+      subject: `New Order — ${order.orderNumber} from ${order.parentName}`,
+      html: adminHtml,
+    }),
+  ]);
 }
 
 // ─── CORS ─────────────────────────────────────────────────────
@@ -755,6 +849,10 @@ app.post("/api/orders", parentMiddleware, async (req, res) => {
     }
     return newOrder;
   });
+  // Send confirmation emails (non-blocking — won't fail the order if email fails)
+  sendOrderEmails(order, parent.email).catch((err) =>
+    console.warn("Email send failed:", err.message),
+  );
   res.status(201).json(order);
 });
 
@@ -1035,6 +1133,44 @@ app.put("/api/admin/orders/:id/status", adminMiddleware(), async (req, res) => {
     });
   });
   res.json(updated);
+  // Notify parent of status change
+  if (process.env.RESEND_API_KEY) {
+    console.log("order update");
+    const parentRecord = await prisma.parent.findUnique({
+      where: { id: updated.parentId },
+      select: { email: true },
+    });
+    if (parentRecord) {
+      const statusLabels = {
+        REVIEW: "Your order is under review",
+        READY_FOR_PICKUP: "🎉 Your order is ready for pick up!",
+        CANCELLED: "Your order has been cancelled",
+        PICKED_UP: "Order marked as picked up — thank you!",
+      };
+      const message = statusLabels[status];
+      if (message) {
+        resend.emails
+          .send({
+            from: process.env.EMAIL_FROM,
+            to: parentRecord.email,
+            subject: `${message} — ${updated.orderNumber}`,
+            html: `
+          <div style="font-family:sans-serif;max-width:600px;margin:0 auto">
+            <div style="background:#1a7a55;padding:24px 32px;border-radius:8px 8px 0 0">
+              <h1 style="color:#fff;margin:0;font-size:20px">Order Update</h1>
+            </div>
+            <div style="background:#fff;padding:32px;border:1px solid #eee;border-top:none;border-radius:0 0 8px 8px">
+              <p>Hi there,</p>
+              <p style="font-size:18px;font-weight:700;color:#1a7a55">${message}</p>
+              <p>Order: <strong>${updated.orderNumber}</strong></p>
+              <p style="color:#666;font-size:13px">If you have any questions please contact the school office.</p>
+            </div>
+          </div>`,
+          })
+          .catch((err) => console.warn("Status email failed:", err.message));
+      }
+    }
+  }
 });
 
 app.get("/api/admin/orders/export", adminMiddleware(), async (req, res) => {
