@@ -277,7 +277,7 @@ async function sendOrderEmails(order, parentEmail) {
 // ─── CORS ─────────────────────────────────────────────────────
 const allowedOrigins = [
   "http://localhost:5173",
-  "https://uniform-ordering-front.vercel.app",
+  "https://wonder-world-uniform.vercel.app",
 ];
 app.use(
   cors({
