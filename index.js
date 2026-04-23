@@ -355,13 +355,27 @@ function formatProduct(p, { includeAdminFields = false } = {}) {
 }
 
 // ─── ORDER NUMBER GENERATOR ───────────────────────────────────
-async function generateOrderNumber() {
+async function generateOrderNumber(locationId) {
+  let prefix = "W";
+  if (locationId) {
+    const loc = await prisma.location.findUnique({
+      where: { id: locationId },
+      select: { name: true },
+    });
+    if (loc?.name) prefix = loc.name.trim()[0].toUpperCase();
+  }
+
+  // Find last order with the same prefix to keep numbering per-location
   const last = await prisma.order.findFirst({
+    where: { orderNumber: { startsWith: `${prefix}-` } },
     orderBy: { createdAt: "desc" },
     select: { orderNumber: true },
   });
-  const num = last ? parseInt(last.orderNumber.replace("WW-", "")) + 1 : 1001;
-  return `WW-${num}`;
+  const num = last
+    ? parseInt(last.orderNumber.replace(`${prefix}-`, "")) + 1
+    : 1001;
+  // Zero-pad to 4 digits: M-1001, K-1023 etc.
+  return `${prefix}-${String(num).padStart(4, "0")}`;
 }
 
 // ─── INVENTORY TRANSITION LOGIC ───────────────────────────────
@@ -781,22 +795,24 @@ app.post("/api/orders", parentMiddleware, async (req, res) => {
   const appliedRate = subtotal >= threshold ? discountRate : 0;
   const discountAmount = +(subtotal * appliedRate).toFixed(2);
   const totalAmount = +(subtotal - discountAmount).toFixed(2);
-  const orderNumber = await generateOrderNumber();
+  const orderNumber = await generateOrderNumber(locationId);
   const parent = await prisma.parent.findUnique({ where: { id: req.user.id } });
 
   const order = await prisma.$transaction(async (tx) => {
-    for (const item of items) {
-      const inv = await tx.inventory.findUnique({
-        where: {
-          productId_size: { productId: item.productId, size: item.size },
-        },
-      });
-      const available = inv ? inv.totalQty - inv.reservedQty : 0;
-      if (available < item.quantity)
-        throw new Error(
-          `Insufficient stock: ${item.productName} size ${item.size} (available: ${available})`,
-        );
-    }
+    // for (const item of items) {
+    //   const inv = await tx.inventory.findUnique({
+    //     where: {
+    //       productId_size: { productId: item.productId, size: item.size },
+    //     },
+    //   });
+    //   const available = inv ? inv.totalQty - inv.reservedQty : 0;
+    //   if (available < item.quantity)
+    //     throw new Error(
+    //       `Insufficient stock: ${item.productName} size ${item.size} (available: ${available})`,
+    //     );
+    // }
+    // Inventory check removed — orders are allowed even with insufficient stock.
+    // Admin can manage stock discrepancies manually via the Inventory page.
     const newOrder = await tx.order.create({
       data: {
         orderNumber,
@@ -1098,6 +1114,7 @@ app.put("/api/admin/orders/:id/status", adminMiddleware(), async (req, res) => {
     "REVIEW",
     "READY_FOR_PICKUP",
     "PICKED_UP",
+    "PAID",
     "CANCELLED",
   ];
   if (!validStatuses.includes(status))
@@ -1128,7 +1145,6 @@ app.put("/api/admin/orders/:id/status", adminMiddleware(), async (req, res) => {
   res.json(updated);
   // Notify parent of status change
   if (process.env.RESEND_API_KEY) {
-    console.log("order update");
     const parentRecord = await prisma.parent.findUnique({
       where: { id: updated.parentId },
       select: { email: true },
@@ -1138,6 +1154,7 @@ app.put("/api/admin/orders/:id/status", adminMiddleware(), async (req, res) => {
         REVIEW: "Your order is under review",
         READY_FOR_PICKUP: "🎉 Your order is ready for pick up!",
         CANCELLED: "Your order has been cancelled",
+        PAID: "✅ Payment received — thank you!",
         PICKED_UP: "Order marked as picked up — thank you!",
       };
       const message = statusLabels[status];
@@ -1319,6 +1336,7 @@ app.put(
     const {
       systemName,
       logoEmoji,
+      logoUrl,
       welcomeTitle,
       welcomeText,
       orderInstructions,
@@ -1332,6 +1350,7 @@ app.put(
         update: {
           systemName,
           logoEmoji,
+          logoUrl,
           welcomeTitle,
           welcomeText,
           orderInstructions,
@@ -1343,6 +1362,7 @@ app.put(
           id: "singleton",
           systemName,
           logoEmoji,
+          logoUrl,
           welcomeTitle,
           welcomeText,
           orderInstructions,
@@ -1352,6 +1372,37 @@ app.put(
         },
       }),
     );
+  },
+);
+
+// ─── LOGO IMAGE UPLOAD ───────────────────────────────────────
+
+app.post(
+  "/api/admin/settings/logo",
+  adminMiddleware(["SUPER_ADMIN", "MANAGER"]),
+  upload.single("logo"),
+  async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+    const ext = path.extname(req.file.originalname).toLowerCase() || ".jpg";
+    const filename = `logo-${Date.now()}${ext}`;
+    const logoUrl = await uploadFile(
+      req.file.buffer || req.file.path,
+      filename,
+      req.file.mimetype,
+    );
+    console.log(logoUrl);
+    // Save to settings
+    await prisma.siteSettings.upsert({
+      where: { id: "singleton" },
+      update: { logoUrl },
+      create: {
+        id: "singleton",
+        logoUrl,
+        discountThreshold: 500,
+        discountRate: 0.15,
+      },
+    });
+    res.json({ logoUrl });
   },
 );
 
