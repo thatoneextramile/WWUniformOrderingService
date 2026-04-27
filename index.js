@@ -1034,10 +1034,10 @@ app.put(
       where: { id: req.params.id },
     });
     if (!inv) return res.status(404).json({ error: "Not found" });
-    if (+totalQty < inv.reservedQty)
-      return res.status(400).json({
-        error: `Cannot set total below reserved (${inv.reservedQty})`,
-      });
+    // if (+totalQty < inv.reservedQty)
+    //   return res.status(400).json({
+    //     error: `Cannot set total below reserved (${inv.reservedQty})`,
+    //   });
     const updated = await prisma.inventory.update({
       where: { id: req.params.id },
       data: { totalQty: +totalQty },
