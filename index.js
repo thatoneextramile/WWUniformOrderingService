@@ -792,7 +792,17 @@ app.post("/api/orders", parentMiddleware, async (req, res) => {
   const threshold = parseFloat(settings?.discountThreshold || 500);
   const discountRate = parseFloat(settings?.discountRate || 0.15);
   const subtotal = items.reduce((s, i) => s + i.unitPrice * i.quantity, 0);
-  const appliedRate = subtotal >= threshold ? discountRate : 0;
+
+  // Discount applies only to first-time orders over the threshold
+  const previousOrderCount = await prisma.order.count({
+    where: {
+      parentId: req.user.id,
+      status: { notIn: ["CANCELLED"] },
+    },
+  });
+  const isFirstOrder = previousOrderCount === 0;
+  const appliedRate = subtotal >= threshold && isFirstOrder ? discountRate : 0;
+
   const discountAmount = +(subtotal * appliedRate).toFixed(2);
   const totalAmount = +(subtotal - discountAmount).toFixed(2);
   const orderNumber = await generateOrderNumber(locationId);
