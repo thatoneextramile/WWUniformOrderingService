@@ -25,6 +25,7 @@ enum OrderStatus {
   READY_FOR_PICKUP
   PICKED_UP
   CANCELLED
+  PAID
 }
 
 enum Size {
