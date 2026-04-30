@@ -793,10 +793,11 @@ app.post("/api/orders", parentMiddleware, async (req, res) => {
   const discountRate = parseFloat(settings?.discountRate || 0.15);
   const subtotal = items.reduce((s, i) => s + i.unitPrice * i.quantity, 0);
 
-  // Discount applies only to first-time orders over the threshold
+  // Check if this child has had a previous non-cancelled order
   const previousOrderCount = await prisma.order.count({
     where: {
       parentId: req.user.id,
+      childName: { equals: childName, mode: "insensitive" },
       status: { notIn: ["CANCELLED"] },
     },
   });
@@ -873,6 +874,20 @@ app.post("/api/orders", parentMiddleware, async (req, res) => {
     console.warn("Email send failed:", err.message),
   );
   res.status(201).json(order);
+});
+
+app.get("/api/orders/check-first-order", parentMiddleware, async (req, res) => {
+  const { childName } = req.query;
+  if (!childName) return res.json({ isFirstOrder: true });
+  const count = await prisma.order.count({
+    where: {
+      parentId: req.user.id,
+      childName: { equals: childName.trim(), mode: "insensitive" },
+      status: { notIn: ["CANCELLED"] },
+    },
+  });
+  console.log(count);
+  res.json({ isFirstOrder: count === 0 });
 });
 
 app.get("/api/orders/mine", parentMiddleware, async (req, res) => {
