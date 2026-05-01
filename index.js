@@ -245,6 +245,7 @@ async function sendOrderEmails(order, parentEmail) {
       </div>
     </div>`;
 
+    console.log(process.env.EMAIL_FROM)
   // Send both emails concurrently, don't let email failure break the order
   await Promise.allSettled([
     resend.emails.send({
