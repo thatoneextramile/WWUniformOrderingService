@@ -81,6 +81,20 @@ if (STORAGE_MODE === "local" && !fs.existsSync(UPLOAD_DIR)) {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 }
 
+async function getAdminEmailList() {
+  const s = await prisma.siteSettings.findUnique({
+    where: { id: "singleton" },
+    select: { adminEmails: true },
+  });
+  const emails = (s?.adminEmails || "")
+    .split(";")
+    .map((e) => e.trim())
+    .filter(Boolean);
+  console.log(emails);
+  if (emails.length > 0) return emails;
+  return process.env.ADMIN_EMAIL ? [process.env.ADMIN_EMAIL] : [];
+}
+
 // ─── MULTER CONFIG ────────────────────────────────────────────
 // Accepts up to 10 images per request, max 8 MB each.
 // Validates mime type before saving — rejects non-images immediately.
@@ -245,9 +259,9 @@ async function sendOrderEmails(order, parentEmail) {
       </div>
     </div>`;
 
-    console.log(process.env.EMAIL_FROM)
-    console.log(process.env.ADMIN_EMAIL)
   // Send both emails concurrently, don't let email failure break the order
+  const adminEmailList = await getAdminEmailList();
+  // Send parent confirmation + one email per admin concurrently
   await Promise.allSettled([
     resend.emails.send({
       from: process.env.EMAIL_FROM,
@@ -255,12 +269,14 @@ async function sendOrderEmails(order, parentEmail) {
       subject: `Order Confirmed — ${order.orderNumber}`,
       html: parentHtml,
     }),
-    resend.emails.send({
-      from: process.env.EMAIL_FROM,
-      to: process.env.ADMIN_EMAIL,
-      subject: `New Order — ${order.orderNumber} from ${order.parentName}`,
-      html: adminHtml,
-    }),
+    ...adminEmailList.map((email) =>
+      resend.emails.send({
+        from: process.env.EMAIL_FROM,
+        to: email,
+        subject: `New Order — ${order.orderNumber} from ${order.parentName}`,
+        html: adminHtml,
+      }),
+    ),
   ]);
 }
 
@@ -760,6 +776,8 @@ app.get("/api/settings", async (req, res) => {
     noticeText: s?.noticeText,
     discountThreshold: s?.discountThreshold,
     discountRate: s?.discountRate,
+    adminEmails: s?.adminEmails,
+    orderStockThreshold: s?.orderStockThreshold ?? 0,
   });
 });
 
@@ -791,6 +809,25 @@ app.post("/api/orders", parentMiddleware, async (req, res) => {
   const settings = await prisma.siteSettings.findUnique({
     where: { id: "singleton" },
   });
+  console.log(settings);
+  const orderStockThreshold = settings?.orderStockThreshold ?? 0;
+  if (orderStockThreshold > 0) {
+    // Check every item against the threshold
+    for (const item of items) {
+      const inv = await prisma.inventory.findUnique({
+        where: {
+          productId_size: { productId: item.productId, size: item.size },
+        },
+      });
+      const available = inv ? inv.totalQty - inv.reservedQty : 0;
+      if (available <= orderStockThreshold) {
+        return res.status(400).json({
+          error: `Sorry, ${item.productName} (${item.size}) is currently unavailable for ordering.`,
+        });
+      }
+    }
+  }
+
   const threshold = parseFloat(settings?.discountThreshold || 500);
   const discountRate = parseFloat(settings?.discountRate || 0.15);
   const subtotal = items.reduce((s, i) => s + i.unitPrice * i.quantity, 0);
@@ -888,7 +925,6 @@ app.get("/api/orders/check-first-order", parentMiddleware, async (req, res) => {
       status: { notIn: ["CANCELLED"] },
     },
   });
-  console.log(count);
   res.json({ isFirstOrder: count === 0 });
 });
 
@@ -1370,6 +1406,8 @@ app.put(
       noticeText,
       discountThreshold,
       discountRate,
+      adminEmails,
+      orderStockThreshold,
     } = req.body;
     res.json(
       await prisma.siteSettings.upsert({
@@ -1384,6 +1422,11 @@ app.put(
           noticeText,
           discountThreshold: discountThreshold ? +discountThreshold : undefined,
           discountRate: discountRate ? +discountRate : undefined,
+          adminEmails: adminEmails ?? undefined,
+          orderStockThreshold:
+            orderStockThreshold !== undefined
+              ? +orderStockThreshold
+              : undefined,
         },
         create: {
           id: "singleton",
@@ -1396,6 +1439,11 @@ app.put(
           noticeText,
           discountThreshold: +discountThreshold || 500,
           discountRate: +discountRate || 0.15,
+          adminEmails: adminEmails ?? undefined,
+          orderStockThreshold:
+            orderStockThreshold !== undefined
+              ? +orderStockThreshold
+              : undefined,
         },
       }),
     );

@@ -187,7 +187,8 @@ model SiteSettings {
   discountThreshold Decimal  @db.Decimal(10, 2) @default(500)
   discountRate      Decimal  @db.Decimal(5, 4)  @default(0.15)
   updatedAt         DateTime @updatedAt
-
+  adminEmails       String?
+  orderStockThreshold Int @default(0)
   @@map("site_settings")
 }
 
