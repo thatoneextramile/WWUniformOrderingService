@@ -223,6 +223,47 @@ async function sendOrderEmails(order, parentEmail) {
 
   const baseStyle = `font-family:sans-serif;max-width:600px;margin:0 auto;color:#1a1d23`;
 
+  const footerHtml = `
+  <div style="margin-top:24px;padding-top:20px;border-top:1px solid #e0e0e0;font-family:Arial,sans-serif;font-size:13px;color:#333;line-height:1.7">
+
+    <!-- Signature block -->
+    <p style="margin:0">Warm regards,</p>
+    <div style="font-weight:800;color:#86BAAF">
+    <p style="margin:4px 0 0 0">Jinny</p>
+    <p style="margin:0">Admin team</p>
+    <p style="margin:0">WONDERWORLD MONTESSORI ACADEMY</p>
+    <p style="margin:0">AMI Recognized School</p>
+    </div>
+
+    <!-- Contact row -->
+    <p style="margin:10px 0 4px 0">
+      <strong>P:</strong> <a href="tel:6045719844" style="color:#333;text-decoration:none">(604) 571-9844</a>
+      &nbsp;&nbsp;|&nbsp;&nbsp;
+      <strong>W:</strong> <a href="https://wonderworldmontessori.ca" style="color:#1a5c8a;text-decoration:none">wonderworldmontessori.ca</a>
+    </p>
+    <p style="margin:0 0 4px 0">
+      <strong>E:</strong> <a href="mailto:info@wonderworldmontessori.ca" style="color:#1a5c8a;text-decoration:none">info@wonderworldmontessori.ca</a>
+    </p>
+    <p style="margin:0 0 16px 0">
+      <strong>A:</strong> 6390 Silver Avenue, Burnaby, BC, Canada
+    </p>
+
+    <!-- Logo images row -->
+    <div style="margin-bottom:12px">
+      <img
+        src="https://gibwhnncxuosgilhkuhl.supabase.co/storage/v1/object/public/products/images/footer_image_ww.png"
+        alt="Wonderworld Montessori Academy"
+        style="height:70px;margin-right:12px;vertical-align:bottom"
+        onerror="this.style.display='none'"
+      />
+    </div>
+
+    <!-- Quote -->
+    <p style="margin:0;font-style:italic;font-size:12px;color:#444;font-weight:900">
+      &ldquo;The goal of early childhood education should be to activate the child&rsquo;s own natural desire to learn.&rdquo; - Maria Montessori
+    </p>
+  </div>`;
+
   // ── Email to parent ──────────────────────────────────────
   const parentHtml = `
     <div style="${baseStyle}">
@@ -239,8 +280,11 @@ async function sendOrderEmails(order, parentEmail) {
         <p><strong>Child:</strong> ${order.childName} · ${order.childClass}</p>
         ${orderSummaryHtml}
         <p style="color:#666;font-size:13px;margin-top:24px">You'll receive another email when your order is ready for pick up.</p>
+         ${footerHtml}
       </div>
     </div>`;
+
+  console.log(parentHtml);
 
   // ── Email to admin ───────────────────────────────────────
   const adminHtml = `
@@ -256,6 +300,7 @@ async function sendOrderEmails(order, parentEmail) {
         <p><strong>Parent:</strong> ${order.parentName} · ${order.parentPhone}</p>
         <p><strong>Child:</strong> ${order.childName} · ${order.childClass}</p>
         ${orderSummaryHtml}
+         ${footerHtml}
       </div>
     </div>`;
 
@@ -380,7 +425,17 @@ async function generateOrderNumber(locationId) {
       where: { id: locationId },
       select: { name: true },
     });
-    if (loc?.name) prefix = loc.name.trim()[0].toUpperCase();
+    if (loc?.name) {
+      // Take the part before the first dash, split into words,
+      // use the first letter of each word
+      // e.g. "William West-Burnaby North" → "WW"
+      // e.g. "Buchana-Burnaby North"      → "B"
+      const beforeDash = loc.name.split("-")[0].trim();
+      prefix = beforeDash
+        .split(/\s+/)
+        .map((word) => word[0].toUpperCase())
+        .join("");
+    }
   }
 
   // Find last order with the same prefix to keep numbering per-location
@@ -392,7 +447,6 @@ async function generateOrderNumber(locationId) {
   const num = last
     ? parseInt(last.orderNumber.replace(`${prefix}-`, "")) + 1
     : 1001;
-  // Zero-pad to 4 digits: M-1001, K-1023 etc.
   return `${prefix}-${String(num).padStart(4, "0")}`;
 }
 
@@ -1257,6 +1311,7 @@ app.put("/api/admin/orders/:id/status", adminMiddleware(), async (req, res) => {
               <p style="font-size:18px;font-weight:700;color:#1a7a55">${message}</p>
               <p>Order: <strong>${updated.orderNumber}</strong></p>
               <p style="color:#666;font-size:13px">If you have any questions please contact the school office.</p>
+               ${footerHtml}
             </div>
           </div>`,
           })
@@ -1725,14 +1780,20 @@ app.put(
   "/api/admin/parents/:id",
   adminMiddleware(["SUPER_ADMIN", "MANAGER"]),
   async (req, res) => {
-    const { isActive } = req.body;
+    const { isActive, firstName, lastName, phone, email } = req.body;
     const parent = await prisma.parent.findUnique({
       where: { id: req.params.id },
     });
     if (!parent) return res.status(404).json({ error: "Parent not found" });
     const updated = await prisma.parent.update({
       where: { id: req.params.id },
-      data: { isActive },
+      data: {
+        ...(isActive !== undefined && { isActive }),
+        ...(firstName && { firstName }),
+        ...(lastName && { lastName }),
+        ...(phone !== undefined && { phone }),
+        ...(email && { email }),
+      },
       select: {
         id: true,
         firstName: true,
