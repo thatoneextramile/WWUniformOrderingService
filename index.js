@@ -809,7 +809,6 @@ app.post("/api/orders", parentMiddleware, async (req, res) => {
   const settings = await prisma.siteSettings.findUnique({
     where: { id: "singleton" },
   });
-  console.log(settings);
   const orderStockThreshold = settings?.orderStockThreshold ?? 0;
   if (orderStockThreshold > 0) {
     // Check every item against the threshold
@@ -1128,6 +1127,17 @@ app.get("/api/admin/inventory/export", adminMiddleware(), async (req, res) => {
     .setHeader("Content-Type", "text/csv")
     .setHeader("Content-Disposition", "attachment; filename=inventory.csv")
     .send(csv);
+});
+
+app.get("/api/admin/inventory/available", async (req, res) => {
+  const inv = await prisma.inventory.findMany({
+    select: { productId: true, size: true, totalQty: true, reservedQty: true },
+  });
+  const map = {};
+  inv.forEach((i) => {
+    map[`${i.productId}-${i.size}`] = i.totalQty - i.reservedQty;
+  });
+  res.json(map);
 });
 
 // ─── ORDERS (ADMIN) ──────────────────────────────────────────
