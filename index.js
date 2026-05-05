@@ -1079,7 +1079,17 @@ app.delete(
 
 app.get("/api/admin/inventory", adminMiddleware(), async (req, res) => {
   const inv = await prisma.inventory.findMany({
-    include: { product: { select: { name: true, isActive: true } } },
+    include: {
+      product: {
+        select: {
+          name: true,
+          isActive: true,
+          imageUrls: true,
+          imageUrl: true,
+          imageEmoji: true,
+        },
+      },
+    },
     orderBy: [{ product: { name: "asc" } }, { size: "asc" }],
   });
   res.json(
