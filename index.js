@@ -284,8 +284,6 @@ async function sendOrderEmails(order, parentEmail) {
       </div>
     </div>`;
 
-  console.log(parentHtml);
-
   // ── Email to admin ───────────────────────────────────────
   const adminHtml = `
     <div style="${baseStyle}">
