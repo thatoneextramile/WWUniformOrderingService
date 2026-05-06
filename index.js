@@ -1228,16 +1228,25 @@ app.put(
   },
 );
 
-app.get("/api/admin/inventory/export", adminMiddleware(), async (req, res) => {
+app.get("/api/admin/inventory/export", async (req, res) => {
+  // Accept token from query string (since window.open can't send headers)
+  const token = req.query.token || req.headers.authorization?.split(" ")[1];
+  if (!token) return res.status(401).json({ error: "Unauthorized" });
+  try {
+    jwt.verify(token, JWT_SECRET);
+  } catch {
+    return res.status(401).json({ error: "Invalid token" });
+  }
+
   const inv = await prisma.inventory.findMany({
     include: { product: { select: { name: true } } },
     orderBy: [{ product: { name: "asc" } }, { size: "asc" }],
   });
   const csv = [
-    "Product,Size,Total,Reserved,Available",
+    "Product,Size,Total,Reserved,Available,Sold",
     ...inv.map(
       (i) =>
-        `"${i.product.name}",${i.size},${i.totalQty},${i.reservedQty},${i.totalQty - i.reservedQty}`,
+        `"${i.product.name}",${i.size},${i.totalQty},${i.reservedQty},${i.totalQty - i.reservedQty},${i.soldQty || 0}`,
     ),
   ].join("\n");
   res
@@ -1374,7 +1383,16 @@ app.put("/api/admin/orders/:id/status", adminMiddleware(), async (req, res) => {
   }
 });
 
-app.get("/api/admin/orders/export", adminMiddleware(), async (req, res) => {
+app.get("/api/admin/orders/export", async (req, res) => {
+  // Accept token from query string since window.open can't send headers
+  const token = req.query.token || req.headers.authorization?.split(" ")[1];
+  if (!token) return res.status(401).json({ error: "Unauthorized" });
+  try {
+    jwt.verify(token, JWT_SECRET);
+  } catch {
+    return res.status(401).json({ error: "Invalid token" });
+  }
+
   const orders = await prisma.order.findMany({
     include: { items: true, location: { select: { name: true } } },
     orderBy: { createdAt: "desc" },
