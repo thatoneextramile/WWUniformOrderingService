@@ -90,7 +90,6 @@ async function getAdminEmailList() {
     .split(";")
     .map((e) => e.trim())
     .filter(Boolean);
-  console.log(emails);
   if (emails.length > 0) return emails;
   return process.env.ADMIN_EMAIL ? [process.env.ADMIN_EMAIL] : [];
 }
@@ -144,7 +143,6 @@ async function getS3Uploader() {
  *             returns the S3 public URL.
  */
 async function uploadFile(buffer, filename, mimetype) {
-  console.log(STORAGE_MODE);
   if (STORAGE_MODE === "supabase") {
     const { error } = await supabase.storage
       .from("products")
@@ -541,7 +539,6 @@ app.post(
       return res.status(400).json({
         error: "No images uploaded. Send files under the field name 'images'",
       });
-    console.log("start uploading");
     // Upload each file and collect URLs
     const newUrls = await Promise.all(
       req.files.map((f) => {
@@ -1292,6 +1289,55 @@ app.get("/api/admin/orders", adminMiddleware(), async (req, res) => {
   ]);
   res.json({ orders, total, page: +page, pages: Math.ceil(total / +limit) });
 });
+app.get("/api/admin/orders/export", async (req, res) => {
+  // Accept token from query string since window.open can't send headers;
+  const token = req.query.token || req.headers.authorization?.split(" ")[1];
+  if (!token) return res.status(401).json({ error: "Unauthorized" });
+  try {
+    jwt.verify(token, JWT_SECRET);
+  } catch {
+    return res.status(401).json({ error: "Invalid token" });
+  }
+
+  const orders = await prisma.order.findMany({
+    include: { items: true, location: { select: { name: true } } },
+    orderBy: { createdAt: "desc" },
+  });
+  const rows = [
+    [
+      "Order#",
+      "Date",
+      "Child",
+      "Class",
+      "Parent",
+      "Phone",
+      "Location",
+      "Subtotal",
+      "Discount",
+      "Total",
+      "Status",
+    ],
+  ];
+  for (const o of orders)
+    rows.push([
+      o.orderNumber,
+      o.createdAt.toISOString().split("T")[0],
+      o.childName,
+      o.childClass,
+      o.parentName,
+      o.parentPhone,
+      o.location.name,
+      o.subtotal,
+      o.discountAmount,
+      o.totalAmount,
+      o.status,
+    ]);
+  const csv = rows.map((r) => r.map((c) => `"${c}"`).join(",")).join("\n");
+  res
+    .setHeader("Content-Type", "text/csv")
+    .setHeader("Content-Disposition", "attachment; filename=orders.csv")
+    .send(csv);
+});
 
 app.get("/api/admin/orders/:id", adminMiddleware(), async (req, res) => {
   const order = await prisma.order.findUnique({
@@ -1381,56 +1427,6 @@ app.put("/api/admin/orders/:id/status", adminMiddleware(), async (req, res) => {
       }
     }
   }
-});
-
-app.get("/api/admin/orders/export", async (req, res) => {
-  // Accept token from query string since window.open can't send headers
-  const token = req.query.token || req.headers.authorization?.split(" ")[1];
-  if (!token) return res.status(401).json({ error: "Unauthorized" });
-  try {
-    jwt.verify(token, JWT_SECRET);
-  } catch {
-    return res.status(401).json({ error: "Invalid token" });
-  }
-
-  const orders = await prisma.order.findMany({
-    include: { items: true, location: { select: { name: true } } },
-    orderBy: { createdAt: "desc" },
-  });
-  const rows = [
-    [
-      "Order#",
-      "Date",
-      "Child",
-      "Class",
-      "Parent",
-      "Phone",
-      "Location",
-      "Subtotal",
-      "Discount",
-      "Total",
-      "Status",
-    ],
-  ];
-  for (const o of orders)
-    rows.push([
-      o.orderNumber,
-      o.createdAt.toISOString().split("T")[0],
-      o.childName,
-      o.childClass,
-      o.parentName,
-      o.parentPhone,
-      o.location.name,
-      o.subtotal,
-      o.discountAmount,
-      o.totalAmount,
-      o.status,
-    ]);
-  const csv = rows.map((r) => r.map((c) => `"${c}"`).join(",")).join("\n");
-  res
-    .setHeader("Content-Type", "text/csv")
-    .setHeader("Content-Disposition", "attachment; filename=orders.csv")
-    .send(csv);
 });
 
 // ─── DASHBOARD STATS ─────────────────────────────────────────
@@ -1611,7 +1607,6 @@ app.post(
       filename,
       req.file.mimetype,
     );
-    console.log(logoUrl);
     // Save to settings
     await prisma.siteSettings.upsert({
       where: { id: "singleton" },
