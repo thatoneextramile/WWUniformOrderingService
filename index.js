@@ -455,33 +455,66 @@ async function applyInventoryTransition(orderId, fromStatus, toStatus, tx) {
     include: { items: true },
   });
   if (!order) return;
+
+  const SOLD_STATUSES = ["PAID", "READY_FOR_PICKUP", "PICKED_UP"];
+  const PENDING_STATUSES = ["SUBMITTED", "REVIEW"];
+
   for (const item of order.items) {
     const inv = await tx.inventory.findUnique({
       where: { productId_size: { productId: item.productId, size: item.size } },
     });
     if (!inv) continue;
+
     let update = {};
+
+    // ── Entering SUBMITTED / REVIEW → reserve stock ──────────
     if (
-      ["SUBMITTED", "REVIEW"].includes(toStatus) &&
-      !["SUBMITTED", "REVIEW"].includes(fromStatus)
-    )
+      PENDING_STATUSES.includes(toStatus) &&
+      !PENDING_STATUSES.includes(fromStatus)
+    ) {
       update = { reservedQty: { increment: item.quantity } };
+    }
+
+    // ── Entering PAID, READY_FOR_PICKUP, or PICKED_UP ────────
+    // From pending → deduct total, release reserved, increment sold
     if (
-      toStatus === "READY_FOR_PICKUP" &&
-      ["SUBMITTED", "REVIEW"].includes(fromStatus)
-    )
+      SOLD_STATUSES.includes(toStatus) &&
+      PENDING_STATUSES.includes(fromStatus)
+    ) {
       update = {
         totalQty: { decrement: item.quantity },
         reservedQty: { decrement: item.quantity },
+        soldQty: { increment: item.quantity },
       };
-    if (toStatus === "CANCELLED") {
-      if (["SUBMITTED", "REVIEW"].includes(fromStatus))
-        update = { reservedQty: { decrement: item.quantity } };
-      else if (["READY_FOR_PICKUP", "PICKED_UP"].includes(fromStatus))
-        update = { totalQty: { increment: item.quantity } };
     }
-    if (Object.keys(update).length)
+
+    // From one sold status to another sold status → only update sold qty difference
+    // (stock already deducted, just track the sold count accurately)
+    if (
+      SOLD_STATUSES.includes(toStatus) &&
+      SOLD_STATUSES.includes(fromStatus)
+    ) {
+      // No stock movement needed — already deducted when first entering a SOLD status
+      update = {};
+    }
+
+    // ── CANCELLED ────────────────────────────────────────────
+    if (toStatus === "CANCELLED") {
+      if (PENDING_STATUSES.includes(fromStatus)) {
+        // Was reserved but not sold → release reservation
+        update = { reservedQty: { decrement: item.quantity } };
+      } else if (SOLD_STATUSES.includes(fromStatus)) {
+        // Was sold → restore total stock and reduce sold count
+        update = {
+          totalQty: { increment: item.quantity },
+          soldQty: { decrement: item.quantity },
+        };
+      }
+    }
+
+    if (Object.keys(update).length) {
       await tx.inventory.update({ where: { id: inv.id }, data: update });
+    }
   }
 }
 
@@ -1165,6 +1198,28 @@ app.put(
     const updated = await prisma.inventory.update({
       where: { id: req.params.id },
       data: { totalQty: +totalQty },
+    });
+    res.json({
+      ...updated,
+      availableQty: updated.totalQty - updated.reservedQty,
+    });
+  },
+);
+
+app.put(
+  "/api/admin/inventory/:id/sold",
+  adminMiddleware(["SUPER_ADMIN", "MANAGER"]),
+  async (req, res) => {
+    const { soldQty } = req.body;
+    if (soldQty === undefined || soldQty < 0)
+      return res.status(400).json({ error: "soldQty must be 0 or greater" });
+    const inv = await prisma.inventory.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!inv) return res.status(404).json({ error: "Not found" });
+    const updated = await prisma.inventory.update({
+      where: { id: req.params.id },
+      data: { soldQty: +soldQty },
     });
     res.json({
       ...updated,

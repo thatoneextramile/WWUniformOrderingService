@@ -110,6 +110,7 @@ model Inventory {
   size        Size
   totalQty    Int      @default(0)   // physical stock on hand
   reservedQty Int      @default(0)   // held for SUBMITTED/REVIEW orders
+  soldQty  Int  @default(0)
   updatedAt   DateTime @updatedAt
   product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
 
