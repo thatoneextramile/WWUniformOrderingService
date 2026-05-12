@@ -1112,22 +1112,62 @@ app.put(
       costPrice,
       isActive,
       sortOrder,
+      sizes,
     } = req.body;
-    const product = await prisma.product.update({
-      where: { id: req.params.id },
-      data: {
-        name,
-        description,
-        imageEmoji,
-        imageBg,
-        category,
-        sellingPrice: sellingPrice ? +sellingPrice : undefined,
-        costPrice: costPrice ? +costPrice : undefined,
-        isActive,
-        sortOrder,
-      },
-      include: { inventory: true },
+    const product = await prisma.$transaction(async (tx) => {
+      const updated = await tx.product.update({
+        where: { id: req.params.id },
+        data: {
+          name,
+          description,
+          imageEmoji,
+          imageBg,
+          category,
+          sellingPrice: sellingPrice ? +sellingPrice : undefined,
+          costPrice: costPrice ? +costPrice : undefined,
+          isActive,
+          sortOrder,
+        },
+        include: { inventory: true },
+      });
+
+      // Sync inventory rows if sizes were provided
+      if (Array.isArray(sizes)) {
+        const existingSizes = updated.inventory.map((i) => i.size);
+
+        // Add new sizes
+        const toAdd = sizes.filter((s) => !existingSizes.includes(s));
+        if (toAdd.length) {
+          await tx.inventory.createMany({
+            data: toAdd.map((s) => ({
+              productId: req.params.id,
+              size: s,
+              totalQty: 0,
+              reservedQty: 0,
+              soldQty: 0,
+            })),
+          });
+        }
+
+        // Remove unchecked sizes (only if they have no orders)
+        const toRemove = existingSizes.filter((s) => !sizes.includes(s));
+        for (const s of toRemove) {
+          const inv = updated.inventory.find((i) => i.size === s);
+          if (inv && inv.reservedQty === 0 && inv.soldQty === 0) {
+            await tx.inventory.delete({ where: { id: inv.id } });
+          }
+          // If it has reservations or sales, leave it — don't delete
+        }
+
+        return tx.product.findUnique({
+          where: { id: req.params.id },
+          include: { inventory: true },
+        });
+      }
+
+      return updated;
     });
+
     res.json(formatProduct(product, { includeAdminFields: true }));
   },
 );
@@ -1254,11 +1294,17 @@ app.get("/api/admin/inventory/export", async (req, res) => {
 
 app.get("/api/admin/inventory/available", async (req, res) => {
   const inv = await prisma.inventory.findMany({
-    select: { productId: true, size: true, totalQty: true, reservedQty: true },
+    select: {
+      productId: true,
+      size: true,
+      totalQty: true,
+      reservedQty: true,
+      soldQty: true,
+    },
   });
   const map = {};
   inv.forEach((i) => {
-    map[`${i.productId}-${i.size}`] = i.totalQty - i.reservedQty;
+    map[`${i.productId}-${i.size}`] = i.totalQty - i.reservedQty - i.soldQty;
   });
   res.json(map);
 });
