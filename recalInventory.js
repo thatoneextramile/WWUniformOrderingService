@@ -45,7 +45,7 @@ async function recalcInventory() {
     const newSold = stats.sold;
     // Available = Total Stock - Reserved - Sold
     // Total Stock stays as-is (admin manages this manually)
-    const newAvailable = inv.totalQty - newReserved - newSold;
+    const newAvailable = inv.totalQty - newReserved;
 
     await prisma.inventory.update({
       where: { id: inv.id },

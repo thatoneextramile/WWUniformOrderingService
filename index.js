@@ -1250,14 +1250,28 @@ app.put(
     const { soldQty } = req.body;
     if (soldQty === undefined || soldQty < 0)
       return res.status(400).json({ error: "soldQty must be 0 or greater" });
+
     const inv = await prisma.inventory.findUnique({
       where: { id: req.params.id },
     });
     if (!inv) return res.status(404).json({ error: "Not found" });
+
+    const oldSold = inv.soldQty ?? 0;
+    const diff = +soldQty - oldSold; // positive = more sold, negative = return
+
+    // Auto-adjust totalQty:
+    // If sold increases → totalQty decreases (items left inventory)
+    // If sold decreases → totalQty increases (items returned to stock)
+    const newTotal = Math.max(0, inv.totalQty - diff);
+
     const updated = await prisma.inventory.update({
       where: { id: req.params.id },
-      data: { soldQty: +soldQty },
+      data: {
+        soldQty: +soldQty,
+        totalQty: newTotal,
+      },
     });
+
     res.json({
       ...updated,
       availableQty: updated.totalQty - updated.reservedQty,
@@ -1304,7 +1318,7 @@ app.get("/api/admin/inventory/available", async (req, res) => {
   });
   const map = {};
   inv.forEach((i) => {
-    map[`${i.productId}-${i.size}`] = i.totalQty - i.reservedQty - i.soldQty;
+    map[`${i.productId}-${i.size}`] = i.totalQty - i.reservedQty;
   });
   res.json(map);
 });
