@@ -76,6 +76,47 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY,
 );
 
+const footerHtml = `
+  <div style="margin-top:24px;padding-top:20px;border-top:1px solid #e0e0e0;font-family:Arial,sans-serif;font-size:13px;color:#333;line-height:1.7">
+
+    <!-- Signature block -->
+    <p style="margin:0">Warm regards,</p>
+    <div style="font-weight:800;color:#86BAAF">
+    <p style="margin:4px 0 0 0">Jinny</p>
+    <p style="margin:0">Admin team</p>
+    <p style="margin:0">WONDERWORLD MONTESSORI ACADEMY</p>
+    <p style="margin:0">AMI Recognized School</p>
+    </div>
+
+    <!-- Contact row -->
+    <p style="margin:10px 0 4px 0">
+      <strong>P:</strong> <a href="tel:6045719844" style="color:#333;text-decoration:none">(604) 571-9844</a>
+      &nbsp;&nbsp;|&nbsp;&nbsp;
+      <strong>W:</strong> <a href="https://wonderworldmontessori.ca" style="color:#1a5c8a;text-decoration:none">wonderworldmontessori.ca</a>
+    </p>
+    <p style="margin:0 0 4px 0">
+      <strong>E:</strong> <a href="mailto:info@wonderworldmontessori.ca" style="color:#1a5c8a;text-decoration:none">info@wonderworldmontessori.ca</a>
+    </p>
+    <p style="margin:0 0 16px 0">
+      <strong>A:</strong> 6390 Silver Avenue, Burnaby, BC, Canada
+    </p>
+
+    <!-- Logo images row -->
+    <div style="margin-bottom:12px">
+      <img
+        src="https://gibwhnncxuosgilhkuhl.supabase.co/storage/v1/object/public/products/images/footer_image_ww.png"
+        alt="Wonderworld Montessori Academy"
+        style="height:70px;margin-right:12px;vertical-align:bottom"
+        onerror="this.style.display='none'"
+      />
+    </div>
+
+    <!-- Quote -->
+    <p style="margin:0;font-style:italic;font-size:12px;color:#444;font-weight:900">
+      &ldquo;The goal of early childhood education should be to activate the child&rsquo;s own natural desire to learn.&rdquo; - Maria Montessori
+    </p>
+  </div>`;
+
 // ─── ENSURE LOCAL UPLOAD DIR EXISTS ──────────────────────────
 if (STORAGE_MODE === "local" && !fs.existsSync(UPLOAD_DIR)) {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -220,47 +261,6 @@ async function sendOrderEmails(order, parentEmail) {
     </table>`;
 
   const baseStyle = `font-family:sans-serif;max-width:600px;margin:0 auto;color:#1a1d23`;
-
-  const footerHtml = `
-  <div style="margin-top:24px;padding-top:20px;border-top:1px solid #e0e0e0;font-family:Arial,sans-serif;font-size:13px;color:#333;line-height:1.7">
-
-    <!-- Signature block -->
-    <p style="margin:0">Warm regards,</p>
-    <div style="font-weight:800;color:#86BAAF">
-    <p style="margin:4px 0 0 0">Jinny</p>
-    <p style="margin:0">Admin team</p>
-    <p style="margin:0">WONDERWORLD MONTESSORI ACADEMY</p>
-    <p style="margin:0">AMI Recognized School</p>
-    </div>
-
-    <!-- Contact row -->
-    <p style="margin:10px 0 4px 0">
-      <strong>P:</strong> <a href="tel:6045719844" style="color:#333;text-decoration:none">(604) 571-9844</a>
-      &nbsp;&nbsp;|&nbsp;&nbsp;
-      <strong>W:</strong> <a href="https://wonderworldmontessori.ca" style="color:#1a5c8a;text-decoration:none">wonderworldmontessori.ca</a>
-    </p>
-    <p style="margin:0 0 4px 0">
-      <strong>E:</strong> <a href="mailto:info@wonderworldmontessori.ca" style="color:#1a5c8a;text-decoration:none">info@wonderworldmontessori.ca</a>
-    </p>
-    <p style="margin:0 0 16px 0">
-      <strong>A:</strong> 6390 Silver Avenue, Burnaby, BC, Canada
-    </p>
-
-    <!-- Logo images row -->
-    <div style="margin-bottom:12px">
-      <img
-        src="https://gibwhnncxuosgilhkuhl.supabase.co/storage/v1/object/public/products/images/footer_image_ww.png"
-        alt="Wonderworld Montessori Academy"
-        style="height:70px;margin-right:12px;vertical-align:bottom"
-        onerror="this.style.display='none'"
-      />
-    </div>
-
-    <!-- Quote -->
-    <p style="margin:0;font-style:italic;font-size:12px;color:#444;font-weight:900">
-      &ldquo;The goal of early childhood education should be to activate the child&rsquo;s own natural desire to learn.&rdquo; - Maria Montessori
-    </p>
-  </div>`;
 
   // ── Email to parent ──────────────────────────────────────
   const parentHtml = `
