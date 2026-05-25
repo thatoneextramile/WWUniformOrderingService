@@ -1456,32 +1456,67 @@ app.put("/api/admin/orders/:id/status", adminMiddleware(), async (req, res) => {
     });
     if (parentRecord) {
       const statusLabels = {
-        REVIEW: "Your order is under review",
+        // REVIEW: "Your order is under review",
         READY_FOR_PICKUP: "🎉 Your order is ready for pick up!",
-        CANCELLED: "Your order has been cancelled",
+        // CANCELLED: "Your order has been cancelled",
         PAID: "✅ Payment received — thank you!",
-        PICKED_UP: "Order marked as picked up — thank you!",
+        // PICKED_UP: "Order marked as picked up — thank you!",
       };
       const message = statusLabels[status];
       if (message) {
+        // Build full order detail HTML (same structure as new order email)
+        const statusItemsHtml = updated.items
+          .map(
+            (i) => `
+              <tr>
+                <td style="padding:8px 12px;border-bottom:1px solid #eee">${i.productName}</td>
+                <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:center">${i.size}</td>
+                <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:center">${i.quantity}</td>
+                <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right">$${Number(i.unitPrice).toFixed(2)}</td>
+              </tr>`,
+          )
+          .join("");
+
+        const statusOrderSummaryHtml = `
+              <table style="width:100%;border-collapse:collapse;margin:16px 0">
+                <thead>
+                  <tr style="background:#f7f8fa">
+                    <th style="padding:8px 12px;text-align:left">Item</th>
+                    <th style="padding:8px 12px;text-align:center">Size</th>
+                    <th style="padding:8px 12px;text-align:center">Qty</th>
+                    <th style="padding:8px 12px;text-align:right">Price</th>
+                  </tr>
+                </thead>
+                <tbody>${statusItemsHtml}</tbody>
+              </table>
+              <table style="width:100%;margin-top:8px">
+                <tr><td style="padding:4px 12px;color:#666">Subtotal</td><td style="padding:4px 12px;text-align:right">$${Number(updated.subtotal).toFixed(2)}</td></tr>
+                ${Number(updated.discountAmount) > 0 ? `<tr><td style="padding:4px 12px;color:#e05a2b">Discount</td><td style="padding:4px 12px;text-align:right;color:#e05a2b">-$${Number(updated.discountAmount).toFixed(2)}</td></tr>` : ""}
+                <tr style="font-weight:700;font-size:16px"><td style="padding:8px 12px;border-top:2px solid #eee">Total</td><td style="padding:8px 12px;text-align:right;border-top:2px solid #eee;color:#1a7a55">$${Number(updated.totalAmount).toFixed(2)}</td></tr>
+              </table>`;
         resend.emails
           .send({
             from: process.env.EMAIL_FROM,
             to: parentRecord.email,
             subject: `${message} — ${updated.orderNumber}`,
             html: `
-          <div style="font-family:sans-serif;max-width:600px;margin:0 auto">
-            <div style="background:#1a7a55;padding:24px 32px;border-radius:8px 8px 0 0">
-              <h1 style="color:#fff;margin:0;font-size:20px">Order Update</h1>
+         <div style="font-family:sans-serif;max-width:600px;margin:0 auto;color:#1a1d23">
+          <div style="background:#1a7a55;padding:24px 32px;border-radius:8px 8px 0 0">
+            <h1 style="color:#fff;margin:0;font-size:20px">Order Update</h1>
+          </div>
+          <div style="background:#fff;padding:32px;border:1px solid #eee;border-top:none;border-radius:0 0 8px 8px">
+            <p>Hi <strong>${updated.parentName}</strong>,</p>
+            <p style="font-size:17px;font-weight:700;color:#1a7a55">${message}</p>
+            <div style="background:#f7f8fa;border-radius:8px;padding:16px;margin:16px 0">
+              <p style="margin:0 0 4px 0;font-size:13px;color:#666">Order Number</p>
+              <p style="margin:0;font-size:20px;font-weight:700;color:#1a7a55">${updated.orderNumber}</p>
             </div>
-            <div style="background:#fff;padding:32px;border:1px solid #eee;border-top:none;border-radius:0 0 8px 8px">
-              <p>Hi there,</p>
-              <p style="font-size:18px;font-weight:700;color:#1a7a55">${message}</p>
-              <p>Order: <strong>${updated.orderNumber}</strong></p>
-              <p style="color:#666;font-size:13px">If you have any questions please contact the school office.</p>
-               ${footerHtml}
-            </div>
-          </div>`,
+            <p><strong>Child:</strong> ${updated.childName} · ${updated.childClass}</p>
+            ${statusOrderSummaryHtml}
+            <p style="color:#666;font-size:13px;margin-top:24px">If you have any questions please contact the school office.</p>
+            ${footerHtml}
+          </div>
+        </div>`,
           })
           .catch((err) => console.warn("Status email failed:", err.message));
       }
