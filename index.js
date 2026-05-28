@@ -465,44 +465,43 @@ async function applyInventoryTransition(orderId, fromStatus, toStatus, tx) {
 
     let update = {};
 
-    // ── Entering SUBMITTED / REVIEW → reserve stock ──────────
     if (
       PENDING_STATUSES.includes(toStatus) &&
-      !PENDING_STATUSES.includes(fromStatus)
+      !PENDING_STATUSES.includes(fromStatus) &&
+      !SOLD_STATUSES.includes(fromStatus)
     ) {
+      // Any → PENDING (only from non-pending, non-sold)
       update = { reservedQty: { increment: item.quantity } };
-    }
-
-    // ── Entering PAID, READY_FOR_PICKUP, or PICKED_UP ────────
-    // From pending → deduct total, release reserved, increment sold
-    if (
+    } else if (
       SOLD_STATUSES.includes(toStatus) &&
       PENDING_STATUSES.includes(fromStatus)
     ) {
+      // PENDING → SOLD
       update = {
         totalQty: { decrement: item.quantity },
         reservedQty: { decrement: item.quantity },
         soldQty: { increment: item.quantity },
       };
-    }
-
-    // From one sold status to another sold status → only update sold qty difference
-    // (stock already deducted, just track the sold count accurately)
-    if (
+    } else if (
       SOLD_STATUSES.includes(toStatus) &&
       SOLD_STATUSES.includes(fromStatus)
     ) {
-      // No stock movement needed — already deducted when first entering a SOLD status
+      // SOLD → SOLD (no movement)
       update = {};
-    }
-
-    // ── CANCELLED ────────────────────────────────────────────
-    if (toStatus === "CANCELLED") {
+    } else if (
+      SOLD_STATUSES.includes(fromStatus) &&
+      PENDING_STATUSES.includes(toStatus)
+    ) {
+      // SOLD → PENDING (reverse)
+      update = {
+        totalQty: { increment: item.quantity },
+        reservedQty: { increment: item.quantity },
+        soldQty: { decrement: item.quantity },
+      };
+    } else if (toStatus === "CANCELLED") {
       if (PENDING_STATUSES.includes(fromStatus)) {
-        // Was reserved but not sold → release reservation
         update = { reservedQty: { decrement: item.quantity } };
       } else if (SOLD_STATUSES.includes(fromStatus)) {
-        // Was sold → restore total stock and reduce sold count
         update = {
           totalQty: { increment: item.quantity },
           soldQty: { decrement: item.quantity },
@@ -1290,11 +1289,12 @@ app.get("/api/admin/inventory/export", async (req, res) => {
   }
 
   const inv = await prisma.inventory.findMany({
-    include: { product: { select: { name: true } } },
+    where: { product: { isActive: true } },
+    include: { product: { select: { name: true, isActive: true } } },
     orderBy: [{ product: { name: "asc" } }, { size: "asc" }],
   });
   const csv = [
-    "Product,Size,Total,Reserved,Available,Sold",
+    "Product,Size,Current,Reserved,Available,Sold",
     ...inv.map(
       (i) =>
         `"${i.product.name}",${i.size},${i.totalQty},${i.reservedQty},${i.totalQty - i.reservedQty},${i.soldQty || 0}`,
@@ -1424,9 +1424,23 @@ app.put("/api/admin/orders/:id/status", adminMiddleware(), async (req, res) => {
   ];
   if (!validStatuses.includes(status))
     return res.status(400).json({ error: "Invalid status" });
+  
   const current = await prisma.order.findUnique({
     where: { id: req.params.id },
   });
+  // Prevent changing status once cancelled
+  if (current.status === "CANCELLED") {
+    return res.status(400).json({
+      error: "Cancelled orders cannot be updated.",
+    });
+  }
+
+  // Prevent cancelling a picked up order
+  if (current.status === "PICKED_UP" && status === "CANCELLED") {
+    return res.status(400).json({
+      error: "Picked up orders cannot be cancelled.",
+    });
+  }
   if (!current) return res.status(404).json({ error: "Order not found" });
   if (current.status === status) return res.json(current);
   const updated = await prisma.$transaction(async (tx) => {
