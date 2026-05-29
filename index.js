@@ -1441,6 +1441,13 @@ app.put("/api/admin/orders/:id/status", adminMiddleware(), async (req, res) => {
       error: "Picked up orders cannot be cancelled.",
     });
   }
+
+  // Prevent changing status once picked up
+if (current.status === "PICKED_UP") {
+  return res.status(400).json({
+    error: "Picked up orders cannot be updated.",
+  });
+}
   if (!current) return res.status(404).json({ error: "Order not found" });
   if (current.status === status) return res.json(current);
   const updated = await prisma.$transaction(async (tx) => {
