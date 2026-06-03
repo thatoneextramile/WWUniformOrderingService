@@ -111,6 +111,10 @@ npx prisma migrate dev --name init
 npx prisma generate
 npx prisma db push  #sync up with db
 ```
+### 4.1. Run Prisma for schema update
+npx prisma db push
+npx prisma generate
+
 
 ### 5. Create first admin account
 

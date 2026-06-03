@@ -1337,16 +1337,29 @@ app.get("/api/admin/orders", adminMiddleware(), async (req, res) => {
       { childClass: { contains: search, mode: "insensitive" } },
       { orderNumber: { contains: search, mode: "insensitive" } },
     ];
-  const [orders, total] = await Promise.all([
+  const [rawOrders, total] = await Promise.all([
     prisma.order.findMany({
       where,
-      include: { items: true, location: { select: { name: true } } },
+      include: {
+        items: {
+          include: { product: { select: { name: true } } },
+        },
+        location: { select: { name: true } },
+      },
       orderBy: { createdAt: "desc" },
       skip: (+page - 1) * +limit,
       take: +limit,
     }),
     prisma.order.count({ where }),
   ]);
+
+  const orders = rawOrders.map((o) => ({
+    ...o,
+    items: o.items.map((item) => ({
+      ...item,
+      productName: item.product?.name || item.productName,
+    })),
+  }));
   res.json({ orders, total, page: +page, pages: Math.ceil(total / +limit) });
 });
 app.get("/api/admin/orders/export", async (req, res) => {
@@ -1360,7 +1373,14 @@ app.get("/api/admin/orders/export", async (req, res) => {
   }
 
   const orders = await prisma.order.findMany({
-    include: { items: true, location: { select: { name: true } } },
+    include: {
+      items: {
+        include: {
+          product: { select: { name: true } },
+        },
+      },
+      location: { select: { name: true } },
+    },
     orderBy: { createdAt: "desc" },
   });
   const rows = [
@@ -1372,26 +1392,57 @@ app.get("/api/admin/orders/export", async (req, res) => {
       "Parent",
       "Phone",
       "Location",
+      "Item",
+      "Size",
+      "Qty",
+      "Unit Price",
       "Subtotal",
       "Discount",
       "Total",
       "Status",
     ],
   ];
-  for (const o of orders)
-    rows.push([
-      o.orderNumber,
-      o.createdAt.toISOString().split("T")[0],
-      o.childName,
-      o.childClass,
-      o.parentName,
-      o.parentPhone,
-      o.location.name,
-      o.subtotal,
-      o.discountAmount,
-      o.totalAmount,
-      o.status,
-    ]);
+  for (const o of orders) {
+    if (o.items.length === 0) {
+      rows.push([
+        o.orderNumber,
+        o.createdAt.toISOString().split("T")[0],
+        o.childName,
+        o.childClass,
+        o.parentName,
+        o.parentPhone,
+        o.location.name,
+        "",
+        "",
+        "",
+        "",
+        o.subtotal,
+        o.discountAmount,
+        o.totalAmount,
+        o.status,
+      ]);
+    } else {
+      o.items.forEach((item, idx) => {
+        rows.push([
+          idx === 0 ? o.orderNumber : "", // only show order# on first row
+          idx === 0 ? o.createdAt.toISOString().split("T")[0] : "",
+          idx === 0 ? o.childName : "",
+          idx === 0 ? o.childClass : "",
+          idx === 0 ? o.parentName : "",
+          idx === 0 ? o.parentPhone : "",
+          idx === 0 ? o.location.name : "",
+          item.product?.name || item.productName,
+          item.size,
+          item.quantity,
+          Number(item.unitPrice).toFixed(2),
+          idx === 0 ? o.subtotal : "", // only show totals on first row
+          idx === 0 ? o.discountAmount : "",
+          idx === 0 ? o.totalAmount : "",
+          idx === 0 ? o.status : "",
+        ]);
+      });
+    }
+  }
   const csv = rows.map((r) => r.map((c) => `"${c}"`).join(",")).join("\n");
   res
     .setHeader("Content-Type", "text/csv")
@@ -1403,13 +1454,27 @@ app.get("/api/admin/orders/:id", adminMiddleware(), async (req, res) => {
   const order = await prisma.order.findUnique({
     where: { id: req.params.id },
     include: {
-      items: true,
+      items: {
+        include: {
+          product: { select: { name: true } },
+        },
+      },
       location: true,
       parent: { select: { firstName: true, lastName: true, email: true } },
     },
   });
   if (!order) return res.status(404).json({ error: "Not found" });
-  res.json(order);
+
+  // Override stored productName with current product name if available
+  const enriched = {
+    ...order,
+    items: order.items.map((item) => ({
+      ...item,
+      productName: item.product?.name || item.productName,
+    })),
+  };
+
+  res.json(enriched);
 });
 
 app.put("/api/admin/orders/:id/status", adminMiddleware(), async (req, res) => {
@@ -1424,7 +1489,7 @@ app.put("/api/admin/orders/:id/status", adminMiddleware(), async (req, res) => {
   ];
   if (!validStatuses.includes(status))
     return res.status(400).json({ error: "Invalid status" });
-  
+
   const current = await prisma.order.findUnique({
     where: { id: req.params.id },
   });
@@ -1443,11 +1508,11 @@ app.put("/api/admin/orders/:id/status", adminMiddleware(), async (req, res) => {
   }
 
   // Prevent changing status once picked up
-if (current.status === "PICKED_UP") {
-  return res.status(400).json({
-    error: "Picked up orders cannot be updated.",
-  });
-}
+  if (current.status === "PICKED_UP") {
+    return res.status(400).json({
+      error: "Picked up orders cannot be updated.",
+    });
+  }
   if (!current) return res.status(404).json({ error: "Order not found" });
   if (current.status === status) return res.json(current);
   const updated = await prisma.$transaction(async (tx) => {
