@@ -5,7 +5,7 @@ dotenv.config();
 const prisma = new PrismaClient();
 
 // ── Set the product name to delete ───────────────────────────
-const PRODUCT_NAME = "Tie"; // ← change this to the product name
+const PRODUCT_NAME = "T-shirt short sleeve"; // ← change this to the product name
 
 async function main() {
   // Find the product

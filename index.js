@@ -776,6 +776,7 @@ app.post("/api/auth/parent/login", async (req, res) => {
   const token = signToken({ id: parent.id, type: "parent" });
   res.json({
     token,
+    mustChangePassword: parent.mustChangePassword,
     parent: {
       id: parent.id,
       firstName: parent.firstName,
@@ -785,6 +786,24 @@ app.post("/api/auth/parent/login", async (req, res) => {
     },
   });
 });
+
+app.put(
+  "/api/auth/parent/change-password",
+  parentMiddleware,
+  async (req, res) => {
+    const { newPassword } = req.body;
+    if (!newPassword || newPassword.length < 6)
+      return res
+        .status(400)
+        .json({ error: "Password must be at least 6 characters" });
+    const hashed = await bcrypt.hash(newPassword, 12);
+    await prisma.parent.update({
+      where: { id: req.user.id },
+      data: { password: hashed, mustChangePassword: false },
+    });
+    res.json({ ok: true });
+  },
+);
 
 app.post("/api/auth/admin/login", async (req, res) => {
   const { email, password } = req.body;
@@ -2027,7 +2046,7 @@ app.put(
   "/api/admin/parents/:id",
   adminMiddleware(["SUPER_ADMIN", "MANAGER"]),
   async (req, res) => {
-    const { isActive, firstName, lastName, phone, email } = req.body;
+    const { isActive, firstName, lastName, phone, email, password } = req.body;
     const parent = await prisma.parent.findUnique({
       where: { id: req.params.id },
     });
@@ -2040,6 +2059,10 @@ app.put(
         ...(lastName && { lastName }),
         ...(phone !== undefined && { phone }),
         ...(email && { email }),
+        ...(password && {
+          password: await bcrypt.hash(password, 12),
+          mustChangePassword: true,
+        }),
       },
       select: {
         id: true,
@@ -2051,6 +2074,37 @@ app.put(
       },
     });
     res.json(updated);
+  },
+);
+app.delete(
+  "/api/admin/parents/:id",
+  adminMiddleware(["SUPER_ADMIN"]),
+  async (req, res) => {
+    const parent = await prisma.parent.findUnique({
+      where: { id: req.params.id },
+      select: { id: true },
+    });
+    if (!parent) return res.status(404).json({ error: "Parent not found" });
+
+    await prisma.$transaction(async (tx) => {
+      // Get all orders for this parent
+      const orders = await tx.order.findMany({
+        where: { parentId: req.params.id },
+        select: { id: true },
+      });
+      const orderIds = orders.map((o) => o.id);
+
+      // Delete order items first
+      if (orderIds.length > 0) {
+        await tx.orderItem.deleteMany({ where: { orderId: { in: orderIds } } });
+        await tx.order.deleteMany({ where: { id: { in: orderIds } } });
+      }
+
+      // Delete parent
+      await tx.parent.delete({ where: { id: req.params.id } });
+    });
+
+    res.json({ ok: true });
   },
 );
 

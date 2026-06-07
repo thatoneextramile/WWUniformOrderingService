@@ -77,7 +77,7 @@ model Parent {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   orders    Order[]
-
+  mustChangePassword  Boolean  @default(false)
   @@map("parents")
 }
 
