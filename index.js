@@ -745,7 +745,7 @@ app.post(
 // ══════════════════════════════════════════════════════════════
 
 app.post("/api/auth/parent/register", async (req, res) => {
-  const { firstName, lastName, email, phone, password } = req.body;
+  const { firstName, lastName, email, phone, password, children } = req.body;
   if (!firstName || !email || !password)
     return res
       .status(400)
@@ -757,6 +757,15 @@ app.post("/api/auth/parent/register", async (req, res) => {
   const parent = await prisma.parent.create({
     data: { firstName, lastName, email, phone, password: hashed },
   });
+  if (children?.length) {
+    await prisma.child.createMany({
+      data: children.map((c) => ({
+        parentId: parent.id,
+        name: c.name.trim(),
+        class: c.class?.trim() || null,
+      })),
+    });
+  }
   const token = signToken({ id: parent.id, type: "parent" });
   res.status(201).json({
     token,
@@ -773,17 +782,23 @@ app.post("/api/auth/parent/login", async (req, res) => {
     !(await bcrypt.compare(password, parent.password))
   )
     return res.status(401).json({ error: "Invalid credentials" });
+
+  const parentWithChildren = await prisma.parent.findUnique({
+    where: { id: parent.id },
+    include: { children: { orderBy: { createdAt: "asc" } } },
+  });
   const token = signToken({ id: parent.id, type: "parent" });
   res.json({
     token,
     mustChangePassword: parent.mustChangePassword,
-    parent: {
-      id: parent.id,
-      firstName: parent.firstName,
-      lastName: parent.lastName,
-      email: parent.email,
-      phone: parent.phone,
-    },
+    parent: parentWithChildren,
+    // parent: {
+    //   id: parent.id,
+    //   firstName: parent.firstName,
+    //   lastName: parent.lastName,
+    //   email: parent.email,
+    //   phone: parent.phone,
+    // },
   });
 });
 
@@ -804,6 +819,48 @@ app.put(
     res.json({ ok: true });
   },
 );
+
+app.get("/api/parents/children", parentMiddleware, async (req, res) => {
+  const children = await prisma.child.findMany({
+    where: { parentId: req.user.id },
+    orderBy: { createdAt: "asc" },
+  });
+  res.json(children);
+});
+
+app.post("/api/parents/children", parentMiddleware, async (req, res) => {
+  const { name, class: childClass } = req.body;
+  if (!name?.trim()) return res.status(400).json({ error: "Name is required" });
+  const child = await prisma.child.create({
+    data: {
+      parentId: req.user.id,
+      name: name.trim(),
+      class: childClass?.trim() || null,
+    },
+  });
+  res.status(201).json(child);
+});
+
+app.delete("/api/parents/children/:id", parentMiddleware, async (req, res) => {
+  const child = await prisma.child.findUnique({ where: { id: req.params.id } });
+  if (!child || child.parentId !== req.user.id)
+    return res.status(404).json({ error: "Child not found" });
+  await prisma.child.delete({ where: { id: req.params.id } });
+  res.json({ ok: true });
+});
+
+app.put("/api/parents/children/:id", parentMiddleware, async (req, res) => {
+  const { name, class: childClass } = req.body;
+  if (!name?.trim()) return res.status(400).json({ error: "Name is required" });
+  const child = await prisma.child.findUnique({ where: { id: req.params.id } });
+  if (!child || child.parentId !== req.user.id)
+    return res.status(404).json({ error: "Child not found" });
+  const updated = await prisma.child.update({
+    where: { id: req.params.id },
+    data: { name: name.trim(), class: childClass?.trim() || null },
+  });
+  res.json(updated);
+});
 
 app.post("/api/auth/admin/login", async (req, res) => {
   const { email, password } = req.body;
@@ -901,6 +958,7 @@ app.post("/api/orders", parentMiddleware, async (req, res) => {
     locationId,
     notes,
     extraFields,
+    childId,
     items,
   } = req.body;
   if (!items?.length)
@@ -935,8 +993,10 @@ app.post("/api/orders", parentMiddleware, async (req, res) => {
   const previousOrderCount = await prisma.order.count({
     where: {
       parentId: req.user.id,
-      childName: { equals: childName, mode: "insensitive" },
       status: { notIn: ["CANCELLED"] },
+      ...(childId
+        ? { childId }
+        : { childName: { equals: childName, mode: "insensitive" } }),
     },
   });
   const isFirstOrder = previousOrderCount === 0;
@@ -966,6 +1026,7 @@ app.post("/api/orders", parentMiddleware, async (req, res) => {
       data: {
         orderNumber,
         parentId: req.user.id,
+        childId: childId || null,
         parentName: parentName || `${parent.firstName} ${parent.lastName}`,
         parentPhone: parentPhone || parent.phone,
         childName,
@@ -1015,15 +1076,17 @@ app.post("/api/orders", parentMiddleware, async (req, res) => {
 });
 
 app.get("/api/orders/check-first-order", parentMiddleware, async (req, res) => {
-  const { childName } = req.query;
-  if (!childName) return res.json({ isFirstOrder: true });
-  const count = await prisma.order.count({
-    where: {
-      parentId: req.user.id,
-      childName: { equals: childName.trim(), mode: "insensitive" },
-      status: { notIn: ["CANCELLED"] },
-    },
-  });
+  const { childName, childId } = req.query;
+  const where = {
+    parentId: req.user.id,
+    status: { notIn: ["CANCELLED"] },
+    ...(childId
+      ? { childId }
+      : childName
+        ? { childName: { equals: childName.trim(), mode: "insensitive" } }
+        : {}),
+  };
+  const count = await prisma.order.count({ where });
   res.json({ isFirstOrder: count === 0 });
 });
 
@@ -2017,6 +2080,11 @@ app.get("/api/admin/parents", adminMiddleware(), async (req, res) => {
           { lastName: { contains: search, mode: "insensitive" } },
           { email: { contains: search, mode: "insensitive" } },
           { phone: { contains: search, mode: "insensitive" } },
+          {
+            children: {
+              some: { name: { contains: search, mode: "insensitive" } },
+            },
+          },
         ],
       }
     : {};
@@ -2032,6 +2100,7 @@ app.get("/api/admin/parents", adminMiddleware(), async (req, res) => {
         isActive: true,
         createdAt: true,
         _count: { select: { orders: true } },
+        children: { orderBy: { createdAt: "asc" } },
       },
       orderBy: { createdAt: "desc" },
       skip: (+page - 1) * +limit,
