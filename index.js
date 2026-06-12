@@ -277,7 +277,15 @@ async function sendOrderEmails(order, parentEmail) {
         </div>
         <p><strong>Child:</strong> ${order.childName} · ${order.childClass}</p>
         ${orderSummaryHtml}
-        <p style="color:#666;font-size:13px;margin-top:24px">You'll receive another email when your order is ready for pick up.</p>
+       <div style="margin-top:20px;padding:14px 16px;background:#fdf8ec;border-left:4px solid #d4a843;border-radius:6px">
+        <p style="margin:0 0 6px 0;font-weight:700;font-size:13px;color:#8a6a10">📋 Return &amp; Exchange Policy</p>
+        <p style="margin:0 0 8px 0;font-size:12px;color:#555;line-height:1.6">
+          All uniform orders are final — we are unable to issue refunds once an order has been placed and paid. Size exchanges may be available depending on current stock availability.
+        </p>
+        <p style="margin:0;font-size:12px;color:#555;line-height:1.6">
+          <strong>Pick-Up:</strong> You will receive an email when your uniform order is ready for pick-up at the school front desk.
+        </p>
+      </div>
          ${footerHtml}
       </div>
     </div>`;
@@ -2156,20 +2164,22 @@ app.delete(
     if (!parent) return res.status(404).json({ error: "Parent not found" });
 
     await prisma.$transaction(async (tx) => {
-      // Get all orders for this parent
+      // 1. Delete order items
       const orders = await tx.order.findMany({
         where: { parentId: req.params.id },
         select: { id: true },
       });
       const orderIds = orders.map((o) => o.id);
 
-      // Delete order items first
       if (orderIds.length > 0) {
         await tx.orderItem.deleteMany({ where: { orderId: { in: orderIds } } });
         await tx.order.deleteMany({ where: { id: { in: orderIds } } });
       }
 
-      // Delete parent
+      // 2. Delete children — must happen before deleting parent due to foreign key
+      await tx.child.deleteMany({ where: { parentId: req.params.id } });
+
+      // 3. Delete parent
       await tx.parent.delete({ where: { id: req.params.id } });
     });
 
