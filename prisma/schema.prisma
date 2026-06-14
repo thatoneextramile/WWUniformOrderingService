@@ -85,7 +85,8 @@ model Parent {
 model Child {
   id        String   @id @default(cuid())
   parentId  String
-  name      String
+  lastName  String  @default("")
+  firstName String  @default("")
   class     String?
   createdAt DateTime @default(now())
   parent    Parent   @relation(fields: [parentId], references: [id])

@@ -769,7 +769,8 @@ app.post("/api/auth/parent/register", async (req, res) => {
     await prisma.child.createMany({
       data: children.map((c) => ({
         parentId: parent.id,
-        name: c.name.trim(),
+        firstName: c.firstName.trim(),
+        lastName: c.lastName.trim(),
         class: c.class?.trim() || null,
       })),
     });
@@ -837,12 +838,14 @@ app.get("/api/parents/children", parentMiddleware, async (req, res) => {
 });
 
 app.post("/api/parents/children", parentMiddleware, async (req, res) => {
-  const { name, class: childClass } = req.body;
-  if (!name?.trim()) return res.status(400).json({ error: "Name is required" });
+  const { firstName, lastName, class: childClass } = req.body;
+  if (!firstName?.trim() || !lastName?.trim())
+    return res.status(400).json({ error: "First and last name are required" });
   const child = await prisma.child.create({
     data: {
       parentId: req.user.id,
-      name: name.trim(),
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
       class: childClass?.trim() || null,
     },
   });
@@ -858,14 +861,16 @@ app.delete("/api/parents/children/:id", parentMiddleware, async (req, res) => {
 });
 
 app.put("/api/parents/children/:id", parentMiddleware, async (req, res) => {
-  const { name, class: childClass } = req.body;
-  if (!name?.trim()) return res.status(400).json({ error: "Name is required" });
-  const child = await prisma.child.findUnique({ where: { id: req.params.id } });
-  if (!child || child.parentId !== req.user.id)
-    return res.status(404).json({ error: "Child not found" });
+  const { firstName, lastName, class: childClass } = req.body;
+  if (!firstName?.trim() || !lastName?.trim())
+    return res.status(400).json({ error: "First and last name are required" });
   const updated = await prisma.child.update({
     where: { id: req.params.id },
-    data: { name: name.trim(), class: childClass?.trim() || null },
+    data: {
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
+      class: childClass?.trim() || null,
+    },
   });
   res.json(updated);
 });
@@ -1203,6 +1208,7 @@ app.put(
       sortOrder,
       sizes,
     } = req.body;
+
     const product = await prisma.$transaction(async (tx) => {
       const updated = await tx.product.update({
         where: { id: req.params.id },
@@ -1220,7 +1226,6 @@ app.put(
         include: { inventory: true },
       });
 
-      // Sync inventory rows if sizes were provided
       if (Array.isArray(sizes)) {
         const existingSizes = updated.inventory.map((i) => i.size);
 
@@ -1238,14 +1243,13 @@ app.put(
           });
         }
 
-        // Remove unchecked sizes (only if they have no orders)
+        // Remove unchecked sizes — only if no reservations or sales
         const toRemove = existingSizes.filter((s) => !sizes.includes(s));
         for (const s of toRemove) {
           const inv = updated.inventory.find((i) => i.size === s);
-          if (inv && inv.reservedQty === 0 && inv.soldQty === 0) {
+          if (inv && inv.reservedQty === 0 && (inv.soldQty ?? 0) === 0) {
             await tx.inventory.delete({ where: { id: inv.id } });
           }
-          // If it has reservations or sales, leave it — don't delete
         }
 
         return tx.product.findUnique({
