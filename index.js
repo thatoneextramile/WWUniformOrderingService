@@ -135,6 +135,12 @@ async function getAdminEmailList() {
   return process.env.ADMIN_EMAIL ? [process.env.ADMIN_EMAIL] : [];
 }
 
+// Convert internal size code to display format: T1 → 1T, T2 → 2T etc.
+function displaySize(s) {
+  if (!s) return s;
+  return s.replace(/^T(\d+)$/, "$1T");
+}
+
 // ─── MULTER CONFIG ────────────────────────────────────────────
 // Accepts up to 10 images per request, max 8 MB each.
 // Validates mime type before saving — rejects non-images immediately.
@@ -235,7 +241,7 @@ async function sendOrderEmails(order, parentEmail) {
       (i) => `
       <tr>
         <td style="padding:8px 12px;border-bottom:1px solid #eee">${i.productName}</td>
-        <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:center">${i.size}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:center">${displaySize(i.size)}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:center">${i.quantity}</td>
         <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right">$${Number(i.unitPrice).toFixed(2)}</td>
       </tr>`,
@@ -1391,7 +1397,7 @@ app.get("/api/admin/inventory/export", async (req, res) => {
     "Product,Size,Current,Reserved,Available,Sold",
     ...inv.map(
       (i) =>
-        `"${i.product.name}",${i.size},${i.totalQty},${i.reservedQty},${i.totalQty - i.reservedQty},${i.soldQty || 0}`,
+        `"${i.product.name}",${displaySize(i.size)},${i.totalQty},${i.reservedQty},${i.totalQty - i.reservedQty},${i.soldQty || 0}`,
     ),
   ].join("\n");
   res
@@ -1526,7 +1532,7 @@ app.get("/api/admin/orders/export", async (req, res) => {
           idx === 0 ? o.parentPhone : "",
           idx === 0 ? o.location.name : "",
           item.product?.name || item.productName,
-          item.size,
+          displaySize(item.size),
           item.quantity,
           Number(item.unitPrice).toFixed(2),
           idx === 0 ? o.subtotal : "", // only show totals on first row
@@ -1650,7 +1656,7 @@ app.put("/api/admin/orders/:id/status", adminMiddleware(), async (req, res) => {
             (i) => `
               <tr>
                 <td style="padding:8px 12px;border-bottom:1px solid #eee">${i.productName}</td>
-                <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:center">${i.size}</td>
+                <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:center">${displaySize(i.size)}</td>
                 <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:center">${i.quantity}</td>
                 <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right">$${Number(i.unitPrice).toFixed(2)}</td>
               </tr>`,
