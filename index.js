@@ -1004,6 +1004,12 @@ app.post("/api/orders", parentMiddleware, async (req, res) => {
     }
   }
 
+  if (item.quantity > available) {
+    return res.status(400).json({
+      error: `Insufficient stock for ${item.productName} (${displaySize(item.size)}). Requested: ${item.quantity}, Available: ${available}.`,
+    });
+  }
+
   const threshold = parseFloat(settings?.discountThreshold || 500);
   const discountRate = parseFloat(settings?.discountRate || 0.15);
   const subtotal = items.reduce((s, i) => s + i.unitPrice * i.quantity, 0);
