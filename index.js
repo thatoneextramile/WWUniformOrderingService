@@ -1001,17 +1001,20 @@ app.post("/api/orders", parentMiddleware, async (req, res) => {
           error: `Sorry, ${item.productName} (${item.size}) is currently unavailable for ordering.`,
         });
       }
+      if (item.quantity > available) {
+        return res.status(400).json({
+          error: `Insufficient stock for ${item.productName} (${displaySize(item.size)}). Requested: ${item.quantity}, Available: ${available}.`,
+        });
+      }
     }
   }
 
-  if (item.quantity > available) {
-    return res.status(400).json({
-      error: `Insufficient stock for ${item.productName} (${displaySize(item.size)}). Requested: ${item.quantity}, Available: ${available}.`,
-    });
-  }
-
   const threshold = parseFloat(settings?.discountThreshold || 500);
-  const discountRate = parseFloat(settings?.discountRate || 0.15);
+  const discountRate =
+    settings?.discountRate !== undefined && settings?.discountRate !== null
+      ? parseFloat(settings.discountRate)
+      : 0.15;
+
   const subtotal = items.reduce((s, i) => s + i.unitPrice * i.quantity, 0);
 
   // Check if this child has had a previous non-cancelled order
@@ -1850,7 +1853,12 @@ app.put(
           orderInstructions,
           noticeText,
           discountThreshold: discountThreshold ? +discountThreshold : undefined,
-          discountRate: discountRate ? +discountRate : undefined,
+          discountRate:
+            discountRate === "" ||
+            discountRate === undefined ||
+            discountRate === null
+              ? 0.15
+              : +discountRate,
           adminEmails: adminEmails ?? undefined,
           orderStockThreshold:
             orderStockThreshold !== undefined
