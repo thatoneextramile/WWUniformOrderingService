@@ -2211,6 +2211,8 @@ app.delete(
   },
 );
 
+app.get("/health", (req, res) => res.json({ ok: true }));
+
 // ─── ERROR HANDLER ───────────────────────────────────────────
 
 app.use((err, req, res, next) => {
