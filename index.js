@@ -529,6 +529,119 @@ async function applyInventoryTransition(orderId, fromStatus, toStatus, tx) {
   }
 }
 
+// ─── INVENTORY / ORDERS AUDIT ──────────────────────────────────
+// Recomputes what reservedQty/soldQty *should* be from live order data
+// and diffs it against the Inventory table. Backs both the admin "Stock
+// Audit" page and scripts/audit-inventory.js (keep the two in sync if you
+// change this).
+const AUDIT_PENDING_STATUSES = ["SUBMITTED", "REVIEW"];
+const AUDIT_SOLD_STATUSES = ["PAID", "READY_FOR_PICKUP", "PICKED_UP"];
+const AUDIT_KNOWN_STATUSES = new Set([
+  ...AUDIT_PENDING_STATUSES,
+  ...AUDIT_SOLD_STATUSES,
+  "CANCELLED",
+]);
+
+async function computeInventoryAudit(db) {
+  const [inventory, orders, products] = await Promise.all([
+    db.inventory.findMany(),
+    db.order.findMany({
+      where: { status: { not: "CANCELLED" } },
+      select: { id: true, orderNumber: true, status: true, items: true },
+    }),
+    db.product.findMany({ select: { id: true, name: true } }),
+  ]);
+
+  const productNames = Object.fromEntries(products.map((p) => [p.id, p.name]));
+
+  const expected = {};
+  const bump = (key, field, qty) => {
+    if (!expected[key]) expected[key] = { reserved: 0, sold: 0 };
+    expected[key][field] += qty;
+  };
+
+  const unknownStatusOrders = [];
+  for (const order of orders) {
+    if (!AUDIT_KNOWN_STATUSES.has(order.status)) {
+      unknownStatusOrders.push({
+        id: order.id,
+        orderNumber: order.orderNumber,
+        status: order.status,
+      });
+      continue;
+    }
+    const bucket = AUDIT_PENDING_STATUSES.includes(order.status)
+      ? "reserved"
+      : "sold";
+    for (const item of order.items) {
+      bump(`${item.productId}-${item.size}`, bucket, item.quantity);
+    }
+  }
+
+  const issues = [];
+  for (const inv of inventory) {
+    const key = `${inv.productId}-${inv.size}`;
+    const exp = expected[key] || { reserved: 0, sold: 0 };
+    const productName = productNames[inv.productId] || "(unknown product)";
+    const available = inv.totalQty - inv.reservedQty;
+    const soldQty = inv.soldQty ?? 0;
+
+    const problems = [];
+    if (inv.reservedQty !== exp.reserved) {
+      problems.push(
+        `reservedQty is ${inv.reservedQty}, but SUBMITTED/REVIEW orders account for ${exp.reserved}.`,
+      );
+    }
+    if (soldQty !== exp.sold) {
+      problems.push(
+        `soldQty is ${soldQty}, but PAID/READY_FOR_PICKUP/PICKED_UP orders account for ${exp.sold}.`,
+      );
+    }
+    if (available < 0) {
+      problems.push(
+        `availableQty is ${available} (totalQty ${inv.totalQty} < reservedQty ${inv.reservedQty}) — oversold.`,
+      );
+    }
+    if (inv.totalQty < 0 || inv.reservedQty < 0 || soldQty < 0) {
+      problems.push(
+        `negative raw value(s): total=${inv.totalQty}, reserved=${inv.reservedQty}, sold=${soldQty}.`,
+      );
+    }
+
+    if (problems.length) {
+      issues.push({
+        inventoryId: inv.id,
+        productId: inv.productId,
+        product: productName,
+        size: displaySize(inv.size),
+        totalQty: inv.totalQty,
+        reservedQty: inv.reservedQty,
+        soldQty,
+        availableQty: available,
+        expectedReserved: exp.reserved,
+        expectedSold: exp.sold,
+        problems,
+      });
+    }
+  }
+
+  const invKeys = new Set(inventory.map((i) => `${i.productId}-${i.size}`));
+  const orphans = Object.keys(expected)
+    .filter((k) => !invKeys.has(k))
+    .map((key) => {
+      const [productId, size] = key.split("-");
+      return {
+        productId,
+        size: displaySize(size),
+        product: productNames[productId] || "(unknown product)",
+        expectedReserved: expected[key].reserved,
+        expectedSold: expected[key].sold,
+      };
+    });
+
+  return { issues, orphans, unknownStatusOrders };
+}
+
 // ══════════════════════════════════════════════════════════════
 //  IMAGE UPLOAD ROUTES
 // ══════════════════════════════════════════════════════════════
@@ -1035,67 +1148,98 @@ app.post("/api/orders", parentMiddleware, async (req, res) => {
   const orderNumber = await generateOrderNumber(locationId);
   const parent = await prisma.parent.findUnique({ where: { id: req.user.id } });
 
-  const order = await prisma.$transaction(async (tx) => {
-    // for (const item of items) {
-    //   const inv = await tx.inventory.findUnique({
-    //     where: {
-    //       productId_size: { productId: item.productId, size: item.size },
-    //     },
-    //   });
-    //   const available = inv ? inv.totalQty - inv.reservedQty : 0;
-    //   if (available < item.quantity)
-    //     throw new Error(
-    //       `Insufficient stock: ${item.productName} size ${item.size} (available: ${available})`,
-    //     );
-    // }
-    // Inventory check removed — orders are allowed even with insufficient stock.
-    // Admin can manage stock discrepancies manually via the Inventory page.
-    const newOrder = await tx.order.create({
-      data: {
-        orderNumber,
-        parentId: req.user.id,
-        childId: childId || null,
-        parentName: parentName || `${parent.firstName} ${parent.lastName}`,
-        parentPhone: parentPhone || parent.phone,
-        childName,
-        childClass,
-        locationId,
-        notes,
-        extraFields,
-        subtotal,
-        discountRate: appliedRate,
-        discountAmount,
-        totalAmount,
-        status: "SUBMITTED",
-        statusHistory: [
-          {
-            status: "SUBMITTED",
-            changedAt: new Date().toISOString(),
-            changedBy: req.user.id,
+  let order;
+  try {
+    order = await prisma.$transaction(async (tx) => {
+      const newOrder = await tx.order.create({
+        data: {
+          orderNumber,
+          parentId: req.user.id,
+          childId: childId || null,
+          parentName: parentName || `${parent.firstName} ${parent.lastName}`,
+          parentPhone: parentPhone || parent.phone,
+          childName,
+          childClass,
+          locationId,
+          notes,
+          extraFields,
+          subtotal,
+          discountRate: appliedRate,
+          discountAmount,
+          totalAmount,
+          status: "SUBMITTED",
+          statusHistory: [
+            {
+              status: "SUBMITTED",
+              changedAt: new Date().toISOString(),
+              changedBy: req.user.id,
+            },
+          ],
+          items: {
+            create: items.map((i) => ({
+              productId: i.productId,
+              productName: i.productName,
+              size: i.size,
+              quantity: i.quantity,
+              unitPrice: i.unitPrice,
+            })),
           },
-        ],
-        items: {
-          create: items.map((i) => ({
-            productId: i.productId,
-            productName: i.productName,
-            size: i.size,
-            quantity: i.quantity,
-            unitPrice: i.unitPrice,
-          })),
         },
-      },
-      include: { items: true, location: true },
-    });
-    for (const item of newOrder.items) {
-      await tx.inventory.update({
-        where: {
-          productId_size: { productId: item.productId, size: item.size },
-        },
-        data: { reservedQty: { increment: item.quantity } },
+        include: { items: true, location: true },
       });
+      // Re-check stock and reserve it atomically inside the transaction.
+      // The earlier check (above, before the transaction started) is only a
+      // fast pre-check for UX -- it can go stale if two parents check out
+      // at the same time, so it must never be the only thing standing
+      // between reservedQty and totalQty. We use a compare-and-swap update
+      // here (matching on the reservedQty we just read) so that if another
+      // request reserved stock in between, this update affects 0 rows and
+      // we can detect and reject the conflict instead of silently
+      // over-reserving stock.
+      for (const item of newOrder.items) {
+        const inv = await tx.inventory.findUnique({
+          where: {
+            productId_size: { productId: item.productId, size: item.size },
+          },
+        });
+        if (!inv) continue;
+        const available = inv.totalQty - inv.reservedQty;
+        if (
+          orderStockThreshold > 0 &&
+          available - item.quantity < orderStockThreshold
+        ) {
+          throw Object.assign(
+            new Error(
+              `Insufficient stock for ${item.productName} (${displaySize(item.size)}). Requested: ${item.quantity}, Available: ${available}.`,
+            ),
+            { isStockError: true },
+          );
+        }
+        const result = await tx.inventory.updateMany({
+          where: {
+            productId: item.productId,
+            size: item.size,
+            reservedQty: inv.reservedQty,
+          },
+          data: { reservedQty: { increment: item.quantity } },
+        });
+        if (result.count === 0) {
+          throw Object.assign(
+            new Error(
+              `Stock for ${item.productName} (${displaySize(item.size)}) just changed -- please review your cart and try again.`,
+            ),
+            { isStockError: true },
+          );
+        }
+      }
+      return newOrder;
+    });
+  } catch (err) {
+    if (err.isStockError) {
+      return res.status(400).json({ error: err.message });
     }
-    return newOrder;
-  });
+    throw err;
+  }
   // Send confirmation emails (non-blocking — won't fail the order if email fails)
   sendOrderEmails(order, parent.email).catch((err) =>
     console.warn("Email send failed:", err.message),
@@ -1336,13 +1480,18 @@ app.put(
       where: { id: req.params.id },
     });
     if (!inv) return res.status(404).json({ error: "Not found" });
-    // if (+totalQty < inv.reservedQty)
-    //   return res.status(400).json({
-    //     error: `Cannot set total below reserved (${inv.reservedQty})`,
-    //   });
+    const newTotal = +totalQty;
+    if (!Number.isFinite(newTotal) || newTotal < 0)
+      return res
+        .status(400)
+        .json({ error: "totalQty must be a non-negative number" });
+    if (newTotal < inv.reservedQty)
+      return res.status(400).json({
+        error: `Cannot set total (${newTotal}) below reserved (${inv.reservedQty}). ${inv.reservedQty} unit(s) are held by pending orders.`,
+      });
     const updated = await prisma.inventory.update({
       where: { id: req.params.id },
-      data: { totalQty: +totalQty },
+      data: { totalQty: newTotal },
     });
     res.json({
       ...updated,
@@ -1370,7 +1519,23 @@ app.put(
     // Auto-adjust totalQty:
     // If sold increases → totalQty decreases (items left inventory)
     // If sold decreases → totalQty increases (items returned to stock)
-    const newTotal = Math.max(0, inv.totalQty - diff);
+    const newTotal = inv.totalQty - diff;
+
+    // Previously this silently clamped negative totals to 0 with
+    // Math.max(0, ...), which desynced totalQty from the soldQty the
+    // admin actually entered (e.g. soldQty=50 but totalQty artificially
+    // floored at 0 even though the math implied a negative stock count).
+    // Reject instead so the numbers on screen always add up.
+    if (newTotal < 0)
+      return res.status(400).json({
+        error: `That would require ${-newTotal} more unit(s) than currently in stock (${inv.totalQty}).`,
+      });
+    // Also make sure we never drop total stock below what's still
+    // reserved for pending orders — otherwise availableQty goes negative.
+    if (newTotal < inv.reservedQty)
+      return res.status(400).json({
+        error: `Cannot set sold this high — it would drop total stock (${newTotal}) below reserved (${inv.reservedQty}).`,
+      });
 
     const updated = await prisma.inventory.update({
       where: { id: req.params.id },
@@ -1431,6 +1596,51 @@ app.get("/api/admin/inventory/available", async (req, res) => {
   });
   res.json(map);
 });
+
+/**
+ * GET /api/admin/inventory/audit
+ * Read-only: recomputes reservedQty/soldQty from live order data and
+ * reports any drift from the Inventory table. Powers the admin "Stock
+ * Audit" page.
+ */
+app.get(
+  "/api/admin/inventory/audit",
+  adminMiddleware(["SUPER_ADMIN", "MANAGER"]),
+  async (req, res) => {
+    const result = await computeInventoryAudit(prisma);
+    res.json(result);
+  },
+);
+
+/**
+ * POST /api/admin/inventory/audit/fix
+ * Repairs reservedQty/soldQty to match what the orders table implies.
+ * Never touches totalQty — physical stock counts aren't derivable from
+ * orders alone, so any remaining "oversold" issue after this still needs
+ * a human to check the actual stock on the shelf.
+ */
+app.post(
+  "/api/admin/inventory/audit/fix",
+  adminMiddleware(["SUPER_ADMIN", "MANAGER"]),
+  async (req, res) => {
+    const before = await computeInventoryAudit(prisma);
+    if (before.issues.length) {
+      await prisma.$transaction(
+        before.issues.map((row) =>
+          prisma.inventory.update({
+            where: { id: row.inventoryId },
+            data: {
+              reservedQty: row.expectedReserved,
+              soldQty: row.expectedSold,
+            },
+          }),
+        ),
+      );
+    }
+    const after = await computeInventoryAudit(prisma);
+    res.json({ ...after, fixedCount: before.issues.length });
+  },
+);
 
 // ─── ORDERS (ADMIN) ──────────────────────────────────────────
 
