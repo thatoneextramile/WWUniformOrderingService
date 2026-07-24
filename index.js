@@ -1960,7 +1960,7 @@ app.get("/api/admin/stats", adminMiddleware(), async (req, res) => {
     by: ["productId", "productName"],
     _sum: { quantity: true },
     orderBy: { _sum: { quantity: "desc" } },
-    take: 10,
+    // take: 10,
   });
   res.json({
     totalOrders,
@@ -2324,12 +2324,18 @@ app.get("/api/admin/parents", adminMiddleware(), async (req, res) => {
           { phone: { contains: search, mode: "insensitive" } },
           {
             children: {
-              some: { name: { contains: search, mode: "insensitive" } },
+              some: {
+                OR: [
+                  { firstName: { contains: search, mode: "insensitive" } },
+                  { lastName: { contains: search, mode: "insensitive" } },
+                ],
+              },
             },
           },
         ],
       }
     : {};
+
   const [parents, total] = await Promise.all([
     prisma.parent.findMany({
       where,
@@ -2350,6 +2356,7 @@ app.get("/api/admin/parents", adminMiddleware(), async (req, res) => {
     }),
     prisma.parent.count({ where }),
   ]);
+
   res.json({ parents, total, page: +page, pages: Math.ceil(total / +limit) });
 });
 
