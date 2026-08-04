@@ -107,7 +107,8 @@ createdb wonderworld
 
 ```bash
 cd server
-npx prisma migrate dev --name init
+
+npx prisma migrate dev --name init  (dont use)
 npx prisma generate
 npx prisma db push  #sync up with db
 ```
@@ -115,6 +116,9 @@ npx prisma db push  #sync up with db
 npx prisma db push
 npx prisma generate
 
+
+### 4.1. Back up db
+psql "postgresql://postgres:[password]@[host]:5432/postgres" < backup.sql
 
 ### 5. Create first admin account
 

@@ -334,6 +334,85 @@ async function sendOrderEmails(order, parentEmail) {
     ),
   ]);
 }
+async function sendChangeRequestSubmittedEmail(order, parent, changes) {
+  if (!process.env.RESEND_API_KEY) return;
+
+  const changeLines = changes
+    .map(
+      (c) => `
+      <tr>
+        <td style="padding:8px 12px;border-bottom:1px solid #eee">${c.productName}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:center">${displaySize(c.fromSize)} → ${displaySize(c.toSize)}</td>
+      </tr>`,
+    )
+    .join("");
+
+  const parentHtml = `
+    <div style="font-family:sans-serif;max-width:600px;margin:0 auto;color:#1a1d23">
+      <div style="background:#1a5f8a;padding:24px 32px;border-radius:8px 8px 0 0">
+        <h1 style="color:#fff;margin:0;font-size:20px">Update Request Received</h1>
+      </div>
+      <div style="background:#fff;padding:32px;border:1px solid #eee;border-top:none;border-radius:0 0 8px 8px">
+        <p>Hi <strong>${order.parentName}</strong>,</p>
+        <p>We've received your size change request for <strong>${order.orderNumber}</strong> (${order.childName} · ${order.childClass}):</p>
+        <table style="width:100%;border-collapse:collapse;margin:16px 0">
+          <thead>
+            <tr style="background:#f7f8fa">
+              <th style="padding:8px 12px;text-align:left">Item</th>
+              <th style="padding:8px 12px;text-align:center">Size Change</th>
+            </tr>
+          </thead>
+          <tbody>${changeLines}</tbody>
+        </table>
+        <p>This request is now pending review. We'll email you again as soon as it's approved or declined — no action is needed from you right now.</p>
+        ${footerHtml}
+      </div>
+    </div>`;
+
+  const adminHtml = `
+    <div style="font-family:sans-serif;max-width:600px;margin:0 auto;color:#1a1d23">
+      <div style="background:#e8833a;padding:24px 32px;border-radius:8px 8px 0 0">
+        <h1 style="color:#fff;margin:0;font-size:20px">⚠️ Size Change Request Submitted</h1>
+      </div>
+      <div style="background:#fff;padding:32px;border:1px solid #eee;border-top:none;border-radius:0 0 8px 8px">
+        <div style="background:#f7f8fa;border-radius:8px;padding:16px;margin-bottom:16px">
+          <p style="margin:0 0 4px 0;font-size:13px;color:#666">Order Number</p>
+          <p style="margin:0;font-size:20px;font-weight:700;color:#1a5f8a">${order.orderNumber}</p>
+        </div>
+        <p><strong>Parent:</strong> ${order.parentName} · ${order.parentPhone}</p>
+        <p><strong>Child:</strong> ${order.childName} · ${order.childClass}</p>
+        <table style="width:100%;border-collapse:collapse;margin:16px 0">
+          <thead>
+            <tr style="background:#f7f8fa">
+              <th style="padding:8px 12px;text-align:left">Item</th>
+              <th style="padding:8px 12px;text-align:center">Size Change</th>
+            </tr>
+          </thead>
+          <tbody>${changeLines}</tbody>
+        </table>
+        <p style="color:#666;font-size:13px">Review and approve or reject this request from the admin dashboard.</p>
+        ${footerHtml}
+      </div>
+    </div>`;
+
+  const adminEmailList = await getAdminEmailList();
+  await Promise.allSettled([
+    resend.emails.send({
+      from: process.env.EMAIL_FROM,
+      to: parent.email,
+      subject: `We received your update request — ${order.orderNumber}`,
+      html: parentHtml,
+    }),
+    ...adminEmailList.map((email) =>
+      resend.emails.send({
+        from: process.env.EMAIL_FROM,
+        to: email,
+        subject: `Size change request — ${order.orderNumber} from ${order.parentName}`,
+        html: adminHtml,
+      }),
+    ),
+  ]);
+}
 
 // ─── CORS ─────────────────────────────────────────────────────
 const allowedOrigins = [
@@ -1265,11 +1344,81 @@ app.get("/api/orders/check-first-order", parentMiddleware, async (req, res) => {
 app.get("/api/orders/mine", parentMiddleware, async (req, res) => {
   const orders = await prisma.order.findMany({
     where: { parentId: req.user.id },
-    include: { items: true, location: { select: { name: true } } },
+    include: {
+      items: true,
+      location: { select: { name: true } },
+      changeRequests: { orderBy: { requestedAt: "desc" } },
+    },
     orderBy: { createdAt: "desc" },
   });
   res.json(orders);
 });
+
+// ─── ORDER CHANGE REQUESTS (PARENT) ───────────────────────────
+
+app.post(
+  "/api/orders/:id/change-request",
+  parentMiddleware,
+  async (req, res) => {
+    const { changes } = req.body;
+    if (!Array.isArray(changes) || changes.length === 0)
+      return res
+        .status(400)
+        .json({ error: "At least one size change is required." });
+
+    const order = await prisma.order.findUnique({
+      where: { id: req.params.id },
+      include: { items: true },
+    });
+    if (!order) return res.status(404).json({ error: "Order not found" });
+    if (order.parentId !== req.user.id)
+      return res.status(403).json({ error: "Not your order" });
+    if (!["SUBMITTED", "REVIEW"].includes(order.status))
+      return res
+        .status(400)
+        .json({ error: "This order can no longer be edited." });
+
+    const existingPending = await prisma.orderChangeRequest.findFirst({
+      where: { orderId: order.id, status: "PENDING" },
+    });
+    if (existingPending)
+      return res
+        .status(409)
+        .json({ error: "A change request is already pending for this order." });
+
+    const validProductIds = new Set(order.items.map((i) => i.productId));
+    const cleanChanges = changes.filter(
+      (c) =>
+        c.productId &&
+        c.toSize &&
+        c.fromSize !== c.toSize &&
+        validProductIds.has(c.productId),
+    );
+    if (cleanChanges.length === 0)
+      return res.status(400).json({ error: "No valid size changes found." });
+
+    const changeRequest = await prisma.orderChangeRequest.create({
+      data: { orderId: order.id, changes: cleanChanges },
+    });
+
+    const parent = await prisma.parent.findUnique({
+      where: { id: req.user.id },
+      select: { email: true, firstName: true },
+    });
+
+    if (parent) {
+      sendChangeRequestSubmittedEmail(order, parent, cleanChanges).catch(
+        (err) =>
+          console.warn(
+            `Change-request email failed for ${order.orderNumber}:`,
+            err.message,
+          ),
+      );
+    }
+
+    res.status(201).json(changeRequest);
+  },
+);
 
 // ══════════════════════════════════════════════════════════════
 //  ADMIN ROUTES
@@ -1664,6 +1813,10 @@ app.get("/api/admin/orders", adminMiddleware(), async (req, res) => {
           include: { product: { select: { name: true } } },
         },
         location: { select: { name: true } },
+        changeRequests: {
+          where: { status: "PENDING" },
+          orderBy: { requestedAt: "desc" },
+        },
       },
       orderBy: { createdAt: "desc" },
       skip: (+page - 1) * +limit,
@@ -1832,6 +1985,20 @@ app.put("/api/admin/orders/:id/status", adminMiddleware(), async (req, res) => {
       error: "Picked up orders cannot be updated.",
     });
   }
+
+  // Prevent changing status while a size change request is pending
+  if (["SUBMITTED", "REVIEW"].includes(current.status)) {
+    const pendingChangeRequest = await prisma.orderChangeRequest.findFirst({
+      where: { orderId: req.params.id, status: "PENDING" },
+    });
+    if (pendingChangeRequest) {
+      return res.status(400).json({
+        error:
+          "This order has a pending size change request — approve or reject it before updating status.",
+      });
+    }
+  }
+
   if (!current) return res.status(404).json({ error: "Order not found" });
   if (current.status === status) return res.json(current);
   const updated = await prisma.$transaction(async (tx) => {
@@ -1929,12 +2096,270 @@ app.put("/api/admin/orders/:id/status", adminMiddleware(), async (req, res) => {
   }
 });
 
+app.put(
+  "/api/admin/change-requests/:id/approve",
+  adminMiddleware(),
+  async (req, res) => {
+    const cr = await prisma.orderChangeRequest.findUnique({
+      where: { id: req.params.id },
+      include: { order: { include: { items: true } } },
+    });
+    if (!cr) return res.status(404).json({ error: "Change request not found" });
+    if (cr.status !== "PENDING")
+      return res
+        .status(400)
+        .json({ error: "This request has already been reviewed." });
+
+    let updatedOrder;
+    try {
+      updatedOrder = await prisma.$transaction(async (tx) => {
+        for (const change of cr.changes) {
+          const item = cr.order.items.find(
+            (it) =>
+              it.productId === change.productId && it.size === change.fromSize,
+          );
+          if (!item) continue;
+
+          // Release the reservation held on the original size
+          await tx.inventory.update({
+            where: {
+              productId_size: {
+                productId: change.productId,
+                size: change.fromSize,
+              },
+            },
+            data: { reservedQty: { decrement: item.quantity } },
+          });
+
+          // Re-check and reserve stock on the new size atomically -- same
+          // compare-and-swap pattern used at order creation, so if stock
+          // moved since the parent submitted this request, we catch it
+          // here instead of silently over-reserving.
+          const invNew = await tx.inventory.findUnique({
+            where: {
+              productId_size: {
+                productId: change.productId,
+                size: change.toSize,
+              },
+            },
+          });
+          if (!invNew) {
+            throw Object.assign(
+              new Error(
+                `No inventory record for ${item.productName} (${displaySize(change.toSize)}).`,
+              ),
+              { isStockError: true },
+            );
+          }
+          const available = invNew.totalQty - invNew.reservedQty;
+          if (available < item.quantity) {
+            throw Object.assign(
+              new Error(
+                `Cannot approve — only ${available} unit(s) of ${item.productName} (${displaySize(change.toSize)}) available, need ${item.quantity}.`,
+              ),
+              { isStockError: true },
+            );
+          }
+          const result = await tx.inventory.updateMany({
+            where: {
+              productId: change.productId,
+              size: change.toSize,
+              reservedQty: invNew.reservedQty,
+            },
+            data: { reservedQty: { increment: item.quantity } },
+          });
+          if (result.count === 0) {
+            throw Object.assign(
+              new Error(
+                `Stock for ${item.productName} (${displaySize(change.toSize)}) just changed — please try again.`,
+              ),
+              { isStockError: true },
+            );
+          }
+
+          await tx.orderItem.update({
+            where: { id: item.id },
+            data: { size: change.toSize },
+          });
+        }
+
+        await tx.orderChangeRequest.update({
+          where: { id: cr.id },
+          data: {
+            status: "APPROVED",
+            reviewedAt: new Date(),
+            reviewedById: req.user.id,
+          },
+        });
+
+        return tx.order.findUnique({
+          where: { id: cr.orderId },
+          include: {
+            items: true,
+            location: { select: { name: true } },
+            changeRequests: {
+              where: { status: "PENDING" },
+              orderBy: { requestedAt: "desc" },
+            },
+          },
+        });
+      });
+    } catch (err) {
+      if (err.isStockError) {
+        return res.status(400).json({ error: err.message });
+      }
+      throw err;
+    }
+
+    const parent = await prisma.parent.findUnique({
+      where: { id: updatedOrder.parentId },
+      select: { email: true },
+    });
+    if (parent) {
+      sendChangeRequestDecisionEmail(
+        updatedOrder,
+        parent,
+        cr.changes,
+        "APPROVED",
+      ).catch((err) =>
+        console.warn(
+          `Approval email failed for ${updatedOrder.orderNumber}:`,
+          err.message,
+        ),
+      );
+    }
+
+    res.json(updatedOrder);
+  },
+);
+
+app.put(
+  "/api/admin/change-requests/:id/reject",
+  adminMiddleware(),
+  async (req, res) => {
+    const { note } = req.body;
+    if (!note?.trim())
+      return res.status(400).json({ error: "A rejection note is required." });
+
+    const cr = await prisma.orderChangeRequest.findUnique({
+      where: { id: req.params.id },
+      include: { order: true },
+    });
+    if (!cr) return res.status(404).json({ error: "Change request not found" });
+    if (cr.status !== "PENDING")
+      return res
+        .status(400)
+        .json({ error: "This request has already been reviewed." });
+
+    await prisma.orderChangeRequest.update({
+      where: { id: cr.id },
+      data: {
+        status: "REJECTED",
+        rejectionNote: note.trim(),
+        reviewedAt: new Date(),
+        reviewedById: req.user.id,
+      },
+    });
+
+    const updatedOrder = await prisma.order.findUnique({
+      where: { id: cr.orderId },
+      include: {
+        items: true,
+        location: { select: { name: true } },
+        changeRequests: {
+          where: { status: "PENDING" },
+          orderBy: { requestedAt: "desc" },
+        },
+      },
+    });
+
+    const parent = await prisma.parent.findUnique({
+      where: { id: updatedOrder.parentId },
+      select: { email: true },
+    });
+    if (parent) {
+      sendChangeRequestDecisionEmail(
+        updatedOrder,
+        parent,
+        cr.changes,
+        "REJECTED",
+        note.trim(),
+      ).catch((err) =>
+        console.warn(
+          `Rejection email failed for ${updatedOrder.orderNumber}:`,
+          err.message,
+        ),
+      );
+    }
+
+    res.json(updatedOrder);
+  },
+);
+
+async function sendChangeRequestDecisionEmail(
+  order,
+  parent,
+  changes,
+  decision,
+  note,
+) {
+  if (!process.env.RESEND_API_KEY) return;
+
+  const changeLines = changes
+    .map(
+      (c) => `
+      <tr>
+        <td style="padding:8px 12px;border-bottom:1px solid #eee">${c.productName}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:center">${displaySize(c.fromSize)} → ${displaySize(c.toSize)}</td>
+      </tr>`,
+    )
+    .join("");
+
+  const isApproved = decision === "APPROVED";
+  const headerColor = isApproved ? "#1a7a55" : "#a83d1e";
+  const headerText = isApproved
+    ? "Update Request Approved"
+    : "Update Request Declined";
+  const subject = isApproved
+    ? `Your order update request was approved — ${order.orderNumber}`
+    : `Your order update request was not approved — ${order.orderNumber}`;
+
+  await resend.emails.send({
+    from: process.env.EMAIL_FROM,
+    to: parent.email,
+    subject,
+    html: `
+      <div style="font-family:sans-serif;max-width:600px;margin:0 auto;color:#1a1d23">
+        <div style="background:${headerColor};padding:24px 32px;border-radius:8px 8px 0 0">
+          <h1 style="color:#fff;margin:0;font-size:20px">${headerText}</h1>
+        </div>
+        <div style="background:#fff;padding:32px;border:1px solid #eee;border-top:none;border-radius:0 0 8px 8px">
+          <p>Hi <strong>${order.parentName}</strong>,</p>
+          ${
+            isApproved
+              ? `<p>Your size change request for <strong>${order.orderNumber}</strong> (${order.childName} · ${order.childClass}) has been approved and updated:</p>
+                 <table style="width:100%;border-collapse:collapse;margin:16px 0">
+                   <thead><tr style="background:#f7f8fa"><th style="padding:8px 12px;text-align:left">Item</th><th style="padding:8px 12px;text-align:center">Size Change</th></tr></thead>
+                   <tbody>${changeLines}</tbody>
+                 </table>
+                 <p>No further action is needed.</p>`
+              : `<p>We're unable to approve the size change request for <strong>${order.orderNumber}</strong> (${order.childName} · ${order.childClass}) at this time.</p>
+                 <p style="background:#fef0eb;border-radius:8px;padding:10px 12px;color:#a83d1e"><strong>Note from the school:</strong><br>"${note}"</p>
+                 <p>The order remains unchanged. Please reach out if you'd like to discuss alternatives.</p>`
+          }
+          ${footerHtml}
+        </div>
+      </div>`,
+  });
+}
+
 // ─── DASHBOARD STATS ─────────────────────────────────────────
 
 app.get("/api/admin/stats", adminMiddleware(), async (req, res) => {
   const [totalOrders, pendingOrders, revenueData] = await Promise.all([
     prisma.order.count(),
     prisma.order.count({ where: { status: { in: ["SUBMITTED", "REVIEW"] } } }),
+    prisma.orderChangeRequest.count({ where: { status: "PENDING" } }),
     prisma.order.aggregate({
       where: { status: { notIn: ["CANCELLED"] } },
       _sum: { totalAmount: true },
@@ -1965,6 +2390,7 @@ app.get("/api/admin/stats", adminMiddleware(), async (req, res) => {
   res.json({
     totalOrders,
     pendingOrders,
+    pendingChangeRequests,
     revenue: parseFloat(revenueData._sum.totalAmount || 0),
     profit: +profit.toFixed(2),
     topProducts: productStats,
