@@ -1814,7 +1814,6 @@ app.get("/api/admin/orders", adminMiddleware(), async (req, res) => {
         },
         location: { select: { name: true } },
         changeRequests: {
-          where: { status: "PENDING" },
           orderBy: { requestedAt: "desc" },
         },
       },
