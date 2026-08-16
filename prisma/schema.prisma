@@ -16,7 +16,8 @@ model Admin {
   isActive  Boolean   @default(true)
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
-  changeRequestsReviewed OrderChangeRequest[]
+  changeRequestsReviewed  OrderChangeRequest[] @relation("ReviewedChangeRequests")
+  changeRequestsInitiated OrderChangeRequest[] @relation("InitiatedChangeRequests")
   @@map("admins")
 }
 
@@ -127,16 +128,19 @@ model Order {
 }
 
 model OrderChangeRequest {
-  id            String              @id @default(cuid())
+  id            String              @id @default(uuid())
   orderId       String
+  order         Order               @relation(fields: [orderId], references: [id])
   status        ChangeRequestStatus @default(PENDING)
-  changes       Json                // [{ productId, productName, fromSize, toSize }]
+  changes       Json
   requestedAt   DateTime            @default(now())
   reviewedAt    DateTime?
   reviewedById  String?
+  reviewedBy    Admin?              @relation("ReviewedChangeRequests", fields: [reviewedById], references: [id])
+  initiatedById String?
+  initiatedBy   Admin?              @relation("InitiatedChangeRequests", fields: [initiatedById], references: [id])
   rejectionNote String?
-  order         Order               @relation(fields: [orderId], references: [id])
-  reviewedBy    Admin?              @relation(fields: [reviewedById], references: [id])
+  reviewNote    String?
 }
 
 model OrderItem {

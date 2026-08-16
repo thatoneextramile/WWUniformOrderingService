@@ -1815,6 +1815,7 @@ app.get("/api/admin/orders", adminMiddleware(), async (req, res) => {
         location: { select: { name: true } },
         changeRequests: {
           orderBy: { requestedAt: "desc" },
+          include: { reviewedBy: { select: { name: true, role: true } } },
         },
       },
       orderBy: { createdAt: "desc" },
@@ -2099,15 +2100,49 @@ app.put(
   "/api/admin/change-requests/:id/approve",
   adminMiddleware(),
   async (req, res) => {
-    const cr = await prisma.orderChangeRequest.findUnique({
+    let cr = await prisma.orderChangeRequest.findUnique({
       where: { id: req.params.id },
       include: { order: { include: { items: true } } },
     });
-    if (!cr) return res.status(404).json({ error: "Change request not found" });
+
+    // Admin-initiated flow (e.g. post-pickup size exchange): no change
+    // request exists yet -- :id is the order id, and the diff + sign-off
+    // details are supplied directly in the body instead.
+    if (!cr) {
+      const { orderId, changes, finalApproverId, note } = req.body;
+      if (!orderId || !Array.isArray(changes) || changes.length === 0) {
+        return res.status(404).json({ error: "Change request not found" });
+      }
+      if (finalApproverId && finalApproverId === req.user.id) {
+        return res.status(400).json({
+          error: "Final approver cannot be the same person as the initiator.",
+        });
+      }
+
+      const order = await prisma.order.findUnique({
+        where: { id: orderId },
+        include: { items: true },
+      });
+      if (!order) return res.status(404).json({ error: "Order not found" });
+
+      cr = await prisma.orderChangeRequest.create({
+        data: {
+          orderId: order.id,
+          changes,
+          initiatedById: req.user.id,
+          reviewNote: note || null,
+        },
+        include: { order: { include: { items: true } } },
+      });
+    }
+
     if (cr.status !== "PENDING")
       return res
         .status(400)
         .json({ error: "This request has already been reviewed." });
+
+    const SOLD_STATUSES = ["PAID", "READY_FOR_PICKUP", "PICKED_UP"];
+    const isSoldOrder = SOLD_STATUSES.includes(cr.order.status);
 
     let updatedOrder;
     try {
@@ -2119,21 +2154,42 @@ app.put(
           );
           if (!item) continue;
 
-          // Release the reservation held on the original size
-          await tx.inventory.update({
-            where: {
-              productId_size: {
-                productId: change.productId,
-                size: change.fromSize,
-              },
-            },
-            data: { reservedQty: { decrement: item.quantity } },
-          });
+          const oldQty = item.quantity;
+          const newQty = change.toQuantity != null ? change.toQuantity : oldQty;
+          const isRemoval = newQty === 0;
 
-          // Re-check and reserve stock on the new size atomically -- same
-          // compare-and-swap pattern used at order creation, so if stock
-          // moved since the parent submitted this request, we catch it
-          // here instead of silently over-reserving.
+          // Release/restock the old size — this always happens, removal or not.
+          if (isSoldOrder) {
+            await tx.inventory.update({
+              where: {
+                productId_size: {
+                  productId: change.productId,
+                  size: change.fromSize,
+                },
+              },
+              data: {
+                totalQty: { increment: oldQty },
+                soldQty: { decrement: oldQty },
+              },
+            });
+          } else {
+            await tx.inventory.update({
+              where: {
+                productId_size: {
+                  productId: change.productId,
+                  size: change.fromSize,
+                },
+              },
+              data: { reservedQty: { decrement: oldQty } },
+            });
+          }
+
+          if (isRemoval) {
+            await tx.orderItem.delete({ where: { id: item.id } });
+            continue; // no new-size stock to pull — the line is gone
+          }
+
+          // New size: pull physical stock and record the sale / reservation.
           const invNew = await tx.inventory.findUnique({
             where: {
               productId_size: {
@@ -2151,34 +2207,57 @@ app.put(
             );
           }
           const available = invNew.totalQty - invNew.reservedQty;
-          if (available < item.quantity) {
+          if (available < newQty) {
             throw Object.assign(
               new Error(
-                `Cannot approve — only ${available} unit(s) of ${item.productName} (${displaySize(change.toSize)}) available, need ${item.quantity}.`,
-              ),
-              { isStockError: true },
-            );
-          }
-          const result = await tx.inventory.updateMany({
-            where: {
-              productId: change.productId,
-              size: change.toSize,
-              reservedQty: invNew.reservedQty,
-            },
-            data: { reservedQty: { increment: item.quantity } },
-          });
-          if (result.count === 0) {
-            throw Object.assign(
-              new Error(
-                `Stock for ${item.productName} (${displaySize(change.toSize)}) just changed — please try again.`,
+                `Cannot approve — only ${available} unit(s) of ${item.productName} (${displaySize(change.toSize)}) available, need ${newQty}.`,
               ),
               { isStockError: true },
             );
           }
 
+          if (isSoldOrder) {
+            const result = await tx.inventory.updateMany({
+              where: {
+                productId: change.productId,
+                size: change.toSize,
+                totalQty: invNew.totalQty,
+              },
+              data: {
+                totalQty: { decrement: newQty },
+                soldQty: { increment: newQty },
+              },
+            });
+            if (result.count === 0) {
+              throw Object.assign(
+                new Error(
+                  `Stock for ${item.productName} (${displaySize(change.toSize)}) just changed — please try again.`,
+                ),
+                { isStockError: true },
+              );
+            }
+          } else {
+            const result = await tx.inventory.updateMany({
+              where: {
+                productId: change.productId,
+                size: change.toSize,
+                reservedQty: invNew.reservedQty,
+              },
+              data: { reservedQty: { increment: newQty } },
+            });
+            if (result.count === 0) {
+              throw Object.assign(
+                new Error(
+                  `Stock for ${item.productName} (${displaySize(change.toSize)}) just changed — please try again.`,
+                ),
+                { isStockError: true },
+              );
+            }
+          }
+
           await tx.orderItem.update({
             where: { id: item.id },
-            data: { size: change.toSize },
+            data: { size: change.toSize, quantity: newQty },
           });
         }
 
@@ -2187,7 +2266,7 @@ app.put(
           data: {
             status: "APPROVED",
             reviewedAt: new Date(),
-            reviewedById: req.user.id,
+            reviewedById: req.body.finalApproverId || req.user.id,
           },
         });
 
@@ -2197,8 +2276,8 @@ app.put(
             items: true,
             location: { select: { name: true } },
             changeRequests: {
-              where: { status: "PENDING" },
               orderBy: { requestedAt: "desc" },
+              include: { reviewedBy: { select: { name: true, role: true } } },
             },
           },
         });
@@ -2305,13 +2384,18 @@ async function sendChangeRequestDecisionEmail(
   if (!process.env.RESEND_API_KEY) return;
 
   const changeLines = changes
-    .map(
-      (c) => `
+    .map((c) => {
+      const removed = c.toQuantity === 0;
+      const toQty = c.toQuantity != null ? c.toQuantity : c.quantity;
+      const left = `${displaySize(c.fromSize)} × ${c.quantity}`;
+      const right = removed ? "Removed" : `${displaySize(c.toSize)} × ${toQty}`;
+
+      return `
       <tr>
         <td style="padding:8px 12px;border-bottom:1px solid #eee">${c.productName}</td>
-        <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:center">${displaySize(c.fromSize)} → ${displaySize(c.toSize)}</td>
-      </tr>`,
-    )
+        <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:center">${left} → ${right}</td>
+      </tr>`;
+    })
     .join("");
 
   const isApproved = decision === "APPROVED";
@@ -2338,7 +2422,7 @@ async function sendChangeRequestDecisionEmail(
             isApproved
               ? `<p>Your size change request for <strong>${order.orderNumber}</strong> (${order.childName} · ${order.childClass}) has been approved and updated:</p>
                  <table style="width:100%;border-collapse:collapse;margin:16px 0">
-                   <thead><tr style="background:#f7f8fa"><th style="padding:8px 12px;text-align:left">Item</th><th style="padding:8px 12px;text-align:center">Size Change</th></tr></thead>
+                   <thead><tr style="background:#f7f8fa"><th style="padding:8px 12px;text-align:left">Item</th><th style="padding:8px 12px;text-align:center">Change</th></tr></thead>
                    <tbody>${changeLines}</tbody>
                  </table>
                  <p>No further action is needed.</p>`
