@@ -1820,7 +1820,7 @@ app.get("/api/admin/orders", adminMiddleware(), async (req, res) => {
       },
       orderBy: { createdAt: "desc" },
       skip: (+page - 1) * +limit,
-      take: +limit,
+      // take: +limit,
     }),
     prisma.order.count({ where }),
   ]);
